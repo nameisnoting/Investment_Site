@@ -30,10 +30,11 @@ def apply_unemployed_mode(cfg: "AdvisorConfig") -> "AdvisorConfig":
             (float("inf"), 0.0),
         ],
         core_etf_pool=[
-            {"ticker": "VOO",  "name": "Vanguard S&P 500 ETF",        "weight": 0.35},
+            {"ticker": "VOO",  "name": "Vanguard S&P 500 ETF",        "weight": 0.30},
             {"ticker": "QQQ",  "name": "Invesco QQQ Trust",            "weight": 0.10},
             {"ticker": "SCHD", "name": "Schwab US Dividend Equity",    "weight": 0.25},
             {"ticker": "BND",  "name": "Vanguard Total Bond Market",   "weight": 0.30},
+            {"ticker": "EWY",  "name": "iShares MSCI Korea ETF",       "weight": 0.05},
         ],
     )
 
@@ -88,12 +89,13 @@ class AdvisorConfig:
     cache_dir:      str = ".advisor_cache"
     cache_ttl_hours: int = 6       # 6시간 후 만료 (장중 재다운로드 방지)
 
-    # ── Twelve Data (미국 종목 펀더멘털용, yfinance 차단 우회) ──
-    # 환경변수 TWELVE_DATA_KEY 또는 빈 문자열 (없으면 yfinance fallback)
-    twelve_data_key:  str = field(default_factory=lambda: os.environ.get("TWELVE_DATA_KEY", ""))
-    twelve_data_url:  str = "https://api.twelvedata.com"
-    # 무료 플랜 분당 8 호출 → 안전하게 9초 간격
-    twelve_data_throttle_seconds: float = 9.0
+    # ── Finnhub (미국 종목 펀더멘털, yfinance + Twelve Data 무료 한계 우회) ──
+    # 환경변수 FINNHUB_API_KEY 또는 빈 문자열 (없으면 yfinance fallback)
+    # 무료 플랜: 60 calls/min, 미국 주식 전체 지원, 한국 주식은 미지원
+    finnhub_key:  str = field(default_factory=lambda: os.environ.get("FINNHUB_API_KEY", ""))
+    finnhub_url:  str = "https://finnhub.io/api/v1"
+    # 60/min = 1초/호출이면 충분, 안전 마진 1.2초
+    finnhub_throttle_seconds: float = 1.2
 
     # ── 백테스트 ───────────────────────────────────────────────
     backtest_start: str = "2019-01-01"
@@ -108,10 +110,11 @@ class AdvisorConfig:
     core_ratio: float = 0.50    # 투자금 중 코어 비중 (app.py에서 자산 tier별 override)
 
     core_etf_pool: List[Dict] = field(default_factory=lambda: [
-        {"ticker": "VOO",  "name": "Vanguard S&P 500 ETF",        "weight": 0.40},
+        {"ticker": "VOO",  "name": "Vanguard S&P 500 ETF",         "weight": 0.35},
         {"ticker": "QQQ",  "name": "Invesco QQQ Trust",            "weight": 0.20},
         {"ticker": "SCHD", "name": "Schwab US Dividend Equity",    "weight": 0.20},
-        {"ticker": "BND",  "name": "Vanguard Total Bond Market",   "weight": 0.20},
+        {"ticker": "BND",  "name": "Vanguard Total Bond Market",   "weight": 0.15},
+        {"ticker": "EWY",  "name": "iShares MSCI Korea ETF",       "weight": 0.10},
     ])
 
     # 코어 ETF는 시장 추종 — RSI 기반 진입 보류 부적절.
@@ -143,8 +146,8 @@ class AdvisorConfig:
     })
 
     # ── 종목 풀 ────────────────────────────────────────────────
-    # Twelve Data 무료 분당 8회 제한 → 미국 풀을 20개로 축소
-    # 한국은 무료 플랜에서 statistics 미지원 → yfinance fallback으로 시도
+    # Finnhub 무료 60회/분 → 미국 20개 안정 동작
+    # 한국은 Finnhub 무료 미지원 → 풀에서 제거, 한국 노출은 코어 ETF의 EWY로 대체
     us_pool: List[str] = field(default_factory=lambda: [
         # 빅테크 / 인터넷 (7)
         "AAPL", "MSFT", "GOOGL", "META", "NVDA", "AMZN", "TSLA",
@@ -154,27 +157,17 @@ class AdvisorConfig:
         "UNH", "JNJ", "LLY",
         # 소비재 (4)
         "COST", "WMT", "PG", "KO",
-        # 산업/에너지/홈디포 (3)
-        "HD", "XOM", "BRK-B",
+        # 산업/에너지 (2) — BRK.B는 ticker 형식이 yfinance(BRK-B)/Finnhub(BRK.B)
+        # 충돌해서 제외 (향후 ticker 매핑 도입 시 복원 가능)
+        "HD", "XOM",
     ])
 
-    kr_pool: List[str] = field(default_factory=lambda: [
-        "005930.KS",  # 삼성전자
-        "000660.KS",  # SK하이닉스
-        "005490.KS",  # POSCO홀딩스
-        "035420.KS",  # NAVER
-        "005380.KS",  # 현대차
-        "068270.KS",  # 셀트리온
-        "051910.KS",  # LG화학
-        "006400.KS",  # 삼성SDI
-        "035720.KS",  # 카카오
-        "000270.KS",  # 기아
-    ])
+    # 한국 개별주는 데이터 가용성 이슈로 비활성 (코어 EWY ETF로 한국 노출 유지)
+    kr_pool: List[str] = field(default_factory=lambda: [])
 
-    # ── 종목 메타 (Twelve Data profile 호출 절약) ──────────────
+    # ── 종목 메타 (Finnhub /profile 호출 절약) ─────────────────
     # ticker → {"name": ..., "sector": ...}
     stock_meta: Dict[str, Dict[str, str]] = field(default_factory=lambda: {
-        # 미국
         "AAPL":  {"name": "Apple Inc.",            "sector": "Technology"},
         "MSFT":  {"name": "Microsoft Corp.",       "sector": "Technology"},
         "GOOGL": {"name": "Alphabet Inc.",         "sector": "Communication Services"},
@@ -194,16 +187,4 @@ class AdvisorConfig:
         "KO":    {"name": "Coca-Cola Co.",         "sector": "Consumer Defensive"},
         "HD":    {"name": "Home Depot",            "sector": "Consumer Cyclical"},
         "XOM":   {"name": "Exxon Mobil",           "sector": "Energy"},
-        "BRK-B": {"name": "Berkshire Hathaway B",  "sector": "Financial Services"},
-        # 한국 (yfinance 사용)
-        "005930.KS": {"name": "Samsung Electronics",  "sector": "Technology"},
-        "000660.KS": {"name": "SK hynix",             "sector": "Technology"},
-        "005490.KS": {"name": "POSCO Holdings",       "sector": "Basic Materials"},
-        "035420.KS": {"name": "NAVER Corp.",          "sector": "Communication Services"},
-        "005380.KS": {"name": "Hyundai Motor",        "sector": "Consumer Cyclical"},
-        "068270.KS": {"name": "Celltrion",            "sector": "Healthcare"},
-        "051910.KS": {"name": "LG Chem",              "sector": "Basic Materials"},
-        "006400.KS": {"name": "Samsung SDI",          "sector": "Technology"},
-        "035720.KS": {"name": "Kakao Corp.",          "sector": "Communication Services"},
-        "000270.KS": {"name": "Kia Corp.",            "sector": "Consumer Cyclical"},
     })

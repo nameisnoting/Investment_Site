@@ -33,8 +33,8 @@ class DataFetcher:
     def __init__(self, cache: DataCache, cfg: Optional[AdvisorConfig] = None):
         self.cache = cache
         self.cfg = cfg or AdvisorConfig()
-        # Twelve Data 분당 8회 제한 → 마지막 호출 시각 기록해 throttle
-        self._last_td_call: float = 0.0
+        # Finnhub 분당 60회 제한 → 호출 간 1.2초 throttle
+        self._last_finnhub_call: float = 0.0
 
     def history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         key = self.cache.make_key("hist", ticker, period)
@@ -58,8 +58,8 @@ class DataFetcher:
     def info(self, ticker: str) -> dict:
         """
         펀더멘털 정보 (ROE, PBR, PER, FCF 등).
-          미국 종목 + TWELVE_DATA_KEY 설정 → Twelve Data API 사용 (안정)
-          한국 종목 (.KS/.KQ) 또는 키 없음 → yfinance fallback
+          미국 종목 + FINNHUB_API_KEY 설정 → Finnhub API 사용 (안정)
+          한국 종목 또는 키 없음 → yfinance fallback (Render에선 차단 가능)
         반환 dict는 yfinance info와 호환되는 키 사용 (Screener 코드 무수정).
         """
         key = self.cache.make_key("info", ticker)
@@ -68,18 +68,18 @@ class DataFetcher:
             return cached
 
         is_korean = ticker.endswith(".KS") or ticker.endswith(".KQ")
-        use_td = bool(self.cfg.twelve_data_key) and not is_korean
+        use_finnhub = bool(self.cfg.finnhub_key) and not is_korean
 
         info: dict = {}
-        if use_td:
-            info = self._info_twelve_data(ticker)
+        if use_finnhub:
+            info = self._info_finnhub(ticker)
             if not info:
-                logger.info(f"{ticker}: Twelve Data 실패 → yfinance fallback")
+                logger.info(f"{ticker}: Finnhub 실패 → yfinance fallback")
                 info = self._info_yfinance(ticker)
         else:
             info = self._info_yfinance(ticker)
 
-        # 종목 풀 메타에서 name/sector 보충 (Twelve Data /profile 절약)
+        # 종목 풀 메타에서 name/sector 보충 (별도 API 호출 절약)
         meta = self.cfg.stock_meta.get(ticker)
         if meta:
             info.setdefault("longName",  meta.get("name", ticker))
@@ -98,55 +98,77 @@ class DataFetcher:
             logger.warning(f"yfinance info 실패 ({ticker}): {e}")
             return {}
 
-    def _info_twelve_data(self, ticker: str) -> dict:
+    def _info_finnhub(self, ticker: str) -> dict:
         """
-        Twelve Data /statistics → yfinance info와 호환되는 dict로 변환.
-        무료 플랜 분당 8회 throttle 적용.
+        Finnhub /stock/metric → yfinance info와 호환되는 dict로 변환.
+        무료 60/min throttle 적용 (호출 간 1.2초).
+
+        주의: ROE/마진 등은 percent 단위 (예: 146.69 = 146.69%, ratio가 아님).
+              우리 게이트가 ratio 기준이라 100으로 나눠 정규화함.
         """
-        # ── throttle (분당 8회) ──
-        wait = self.cfg.twelve_data_throttle_seconds - (time.time() - self._last_td_call)
+        # ── throttle ──
+        wait = self.cfg.finnhub_throttle_seconds - (time.time() - self._last_finnhub_call)
         if wait > 0:
             time.sleep(wait)
-        self._last_td_call = time.time()
+        self._last_finnhub_call = time.time()
 
         try:
             r = requests.get(
-                f"{self.cfg.twelve_data_url}/statistics",
-                params={"symbol": ticker, "apikey": self.cfg.twelve_data_key},
+                f"{self.cfg.finnhub_url}/stock/metric",
+                params={"symbol": ticker, "metric": "all", "token": self.cfg.finnhub_key},
                 timeout=15,
             )
             data = r.json()
         except Exception as e:
-            logger.warning(f"Twelve Data 호출 실패 ({ticker}): {e}")
+            logger.warning(f"Finnhub 호출 실패 ({ticker}): {e}")
             return {}
 
-        if not isinstance(data, dict) or data.get("status") == "error":
-            logger.warning(f"Twelve Data 응답 오류 ({ticker}): {data.get('message') if isinstance(data, dict) else data}")
+        if not isinstance(data, dict) or "error" in data:
+            err = data.get("error") if isinstance(data, dict) else data
+            logger.warning(f"Finnhub 응답 오류 ({ticker}): {err}")
             return {}
 
-        stats = data.get("statistics", {})
-        val   = stats.get("valuations_metrics", {})
-        fin   = stats.get("financials", {})
-        inc   = fin.get("income_statement", {})
-        bal   = fin.get("balance_sheet", {})
-        cfl   = fin.get("cash_flow", {})
+        m = data.get("metric", {}) or {}
+        if not m:
+            logger.warning(f"Finnhub {ticker}: metric 비어있음")
+            return {}
 
-        # Twelve Data → yfinance info 키 매핑
-        # debt_to_equity는 yfinance 관행상 %단위 (예: 79.548) — 동일 형식
+        # ── 단위 변환: Finnhub은 percent, yfinance info는 ratio 관행 ──
+        def to_ratio(v):
+            try:
+                return float(v) / 100.0 if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        def to_pct(v):
+            """yfinance의 debtToEquity는 percent (예: 79.548 = 79.548%)"""
+            try:
+                return float(v) * 100.0 if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        def passthrough(v):
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        # Finnhub → yfinance info 키 매핑
         return {
-            "returnOnEquity":    fin.get("return_on_equity_ttm"),     # 이미 ratio
-            "priceToBook":       val.get("price_to_book_mrq"),
-            "trailingPE":        val.get("trailing_pe"),
-            "forwardPE":         val.get("forward_pe"),
-            "debtToEquity":      bal.get("total_debt_to_equity_mrq"),
-            "currentRatio":      bal.get("current_ratio_mrq"),
-            "marketCap":         val.get("market_capitalization"),
-            "revenueGrowth":     inc.get("quarterly_revenue_growth"),
-            "profitMargins":     fin.get("profit_margin"),
-            "operatingMargins":  fin.get("operating_margin"),
-            "pegRatio":          val.get("peg_ratio"),
-            "freeCashflow":      cfl.get("levered_free_cash_flow_ttm"),
-            "totalRevenue":      inc.get("revenue_ttm"),
+            "returnOnEquity":    to_ratio(m.get("roeTTM")),                        # 146.69 → 1.4669
+            "priceToBook":       passthrough(m.get("pbQuarterly") or m.get("pbAnnual")),
+            "trailingPE":        passthrough(m.get("peTTM") or m.get("peNormalizedAnnual")),
+            "forwardPE":         passthrough(m.get("peInclExtraTTM")),
+            "debtToEquity":      to_pct(m.get("totalDebt/totalEquityQuarterly")
+                                        or m.get("totalDebt/totalEquityAnnual")),  # 0.79 → 79.0
+            "currentRatio":      passthrough(m.get("currentRatioQuarterly") or m.get("currentRatioAnnual")),
+            "marketCap":         passthrough(m.get("marketCapitalization")),
+            "revenueGrowth":     to_ratio(m.get("revenueGrowthTTMYoy")),           # 12.76 → 0.1276
+            "profitMargins":     to_ratio(m.get("netProfitMarginTTM")),
+            "operatingMargins":  to_ratio(m.get("operatingMarginTTM")),
+            "pegRatio":          passthrough(m.get("pegRatio")),
+            "freeCashflow":      passthrough(m.get("freeCashFlowTTM")),            # 종종 None
+            "totalRevenue":      passthrough(m.get("revenueTTM")),                 # 종종 None
         }
 
     def stockholders_equity(self, ticker: str) -> Optional[float]:
