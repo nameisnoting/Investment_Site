@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>자산 포트폴리오 & 종목추천</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <div class="app">
+    <div class="header">
+      <h1 class="title">자산 포트폴리오 &amp; 종목추천</h1>
+      <div class="kebab-wrap">
+        <button type="button" id="kebab-btn" class="kebab-btn" aria-label="저장된 포트폴리오">⋮</button>
+        <div id="kebab-menu" class="kebab-menu" hidden>
+          <div class="kebab-header">📂 저장된 포트폴리오</div>
+          <div id="kebab-list" class="kebab-list">
+            <div class="kebab-empty">저장된 항목 없음</div>
+          </div>
+          <div id="kebab-clear-wrap" class="kebab-clear-wrap" hidden>
+            <button type="button" id="kebab-clear" class="kebab-clear">전체 삭제</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <form id="asset-form" class="form" autocomplete="off">
+      <div class="row">
+        <label for="cash">보유 현금</label>
+        <div class="input-wrap">
+          <input type="text" id="cash" inputmode="numeric" />
+          <span class="unit">원</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="deposits">예금액</label>
+        <div class="input-wrap">
+          <input type="text" id="deposits" inputmode="numeric" />
+          <span class="unit">원</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="savings">적금액</label>
+        <div class="input-wrap">
+          <input type="text" id="savings" inputmode="numeric" />
+          <span class="unit">원</span>
+        </div>
+      </div>
+      <div class="row sub">
+        <label for="monthly_savings">월 +</label>
+        <div class="input-wrap">
+          <input type="text" id="monthly_savings" inputmode="numeric" />
+          <span class="unit">원</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="retirement">IRP 등 노후자금</label>
+        <div class="input-wrap">
+          <input type="text" id="retirement" inputmode="numeric" />
+          <span class="unit">원</span>
+        </div>
+      </div>
+      <div class="row sub">
+        <label for="monthly_retirement">월 +</label>
+        <div class="input-wrap">
+          <input type="text" id="monthly_retirement" inputmode="numeric" />
+          <span class="unit">원</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="current_invest">총 투자금</label>
+        <div class="input-wrap">
+          <input type="text" id="current_invest" inputmode="numeric" />
+          <span class="unit">원</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <label>월 수입</label>
+        <div class="radio-wrap">
+          <label class="radio">
+            <input type="radio" name="has_income" value="yes" checked />
+            <span>있음</span>
+          </label>
+          <label class="radio">
+            <input type="radio" name="has_income" value="no" />
+            <span>없음</span>
+          </label>
+        </div>
+      </div>
+      <div class="row sub">
+        <label for="monthly_income">월 +</label>
+        <div class="input-wrap">
+          <input type="text" id="monthly_income" inputmode="numeric" />
+          <span class="unit">원</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="total_assets">총 자산</label>
+        <div class="input-wrap">
+          <input type="text" id="total_assets" inputmode="numeric" readonly />
+          <span class="unit">원</span>
+        </div>
+      </div>
+
+      <div class="risk-row">
+        <div class="risk-head">
+          <span class="risk-title">투자 성향</span>
+          <span id="risk-label" class="risk-current">중간</span>
+        </div>
+        <input type="range" id="risk_level" class="risk-slider"
+               min="1" max="5" step="1" value="3" />
+        <div class="risk-ends">
+          <span>안정적</span>
+          <span>공격적</span>
+        </div>
+      </div>
+
+      <div class="submit-row">
+        <button type="submit" id="submit-btn" class="btn-primary">입력 완료</button>
+      </div>
+    </form>
+
+    <hr class="divider" />
+
+    <section id="result" class="result">
+      <p class="placeholder">결과가 여기에 표시됩니다.</p>
+    </section>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
