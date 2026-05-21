@@ -162,8 +162,21 @@ class AdvisorConfig:
         "HD", "XOM",
     ])
 
-    # 한국 개별주는 데이터 가용성 이슈로 비활성 (코어 EWY ETF로 한국 노출 유지)
-    kr_pool: List[str] = field(default_factory=lambda: [])
+    # 한국 개별주: Render(공유 IP)에선 yfinance 차단으로 비활성
+    # 로컬(ngrok 포함)에선 yfinance가 가정 IP라 작동 → 한국 종목 활성
+    # 환경변수 RENDER는 Render가 자동 셋팅하는 값. 다른 클라우드도 명시적으로 SET 가능.
+    kr_pool: List[str] = field(default_factory=lambda: [] if os.environ.get("RENDER") else [
+        "005930.KS",  # 삼성전자
+        "000660.KS",  # SK하이닉스
+        "005490.KS",  # POSCO홀딩스
+        "035420.KS",  # NAVER
+        "005380.KS",  # 현대차
+        "068270.KS",  # 셀트리온
+        "051910.KS",  # LG화학
+        "006400.KS",  # 삼성SDI
+        "035720.KS",  # 카카오
+        "000270.KS",  # 기아
+    ])
 
     # ── 종목 메타 (Finnhub /profile 호출 절약) ─────────────────
     # ticker → {"name": ..., "sector": ...}
@@ -187,4 +200,15 @@ class AdvisorConfig:
         "KO":    {"name": "Coca-Cola Co.",         "sector": "Consumer Defensive"},
         "HD":    {"name": "Home Depot",            "sector": "Consumer Cyclical"},
         "XOM":   {"name": "Exxon Mobil",           "sector": "Energy"},
+        # 한국 (yfinance fallback 사용 — 로컬/ngrok에서만 작동)
+        "005930.KS": {"name": "Samsung Electronics",  "sector": "Technology"},
+        "000660.KS": {"name": "SK hynix",             "sector": "Technology"},
+        "005490.KS": {"name": "POSCO Holdings",       "sector": "Basic Materials"},
+        "035420.KS": {"name": "NAVER Corp.",          "sector": "Communication Services"},
+        "005380.KS": {"name": "Hyundai Motor",        "sector": "Consumer Cyclical"},
+        "068270.KS": {"name": "Celltrion",            "sector": "Healthcare"},
+        "051910.KS": {"name": "LG Chem",              "sector": "Basic Materials"},
+        "006400.KS": {"name": "Samsung SDI",          "sector": "Technology"},
+        "035720.KS": {"name": "Kakao Corp.",          "sector": "Communication Services"},
+        "000270.KS": {"name": "Kia Corp.",            "sector": "Consumer Cyclical"},
     })
