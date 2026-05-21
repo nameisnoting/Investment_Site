@@ -20,6 +20,7 @@ app.py — Flask 웹 백엔드
 """
 
 import logging
+import os
 from dataclasses import replace
 from io import StringIO
 from typing import Any, Dict
@@ -303,4 +304,7 @@ def advise():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    # 로컬 실행 시 기본값. 배포(Render 등)에서는 gunicorn이 Procfile로 띄움.
+    port = int(os.environ.get("PORT", 5000))
+    host = os.environ.get("HOST", "127.0.0.1")
+    app.run(host=host, port=port, debug=False)

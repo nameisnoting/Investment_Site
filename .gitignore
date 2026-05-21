@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# yfinance 데이터 캐시 (서버 디스크에서 자동 생성됨)
+.advisor_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 빌드/배포 산출물
+*.log
+build/
+dist/
+*.egg-info/
+
+# 환경 변수 (만약 추가하게 되면)
+.env
+.env.local
