@@ -2,6 +2,7 @@
 config.py — 모든 파라미터를 한 곳에서 관리
 코드 수정 없이 config만 바꿔 전략 변경 가능하도록 설계
 """
+import os
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Tuple
 
@@ -87,6 +88,13 @@ class AdvisorConfig:
     cache_dir:      str = ".advisor_cache"
     cache_ttl_hours: int = 6       # 6시간 후 만료 (장중 재다운로드 방지)
 
+    # ── Twelve Data (미국 종목 펀더멘털용, yfinance 차단 우회) ──
+    # 환경변수 TWELVE_DATA_KEY 또는 빈 문자열 (없으면 yfinance fallback)
+    twelve_data_key:  str = field(default_factory=lambda: os.environ.get("TWELVE_DATA_KEY", ""))
+    twelve_data_url:  str = "https://api.twelvedata.com"
+    # 무료 플랜 분당 8 호출 → 안전하게 9초 간격
+    twelve_data_throttle_seconds: float = 9.0
+
     # ── 백테스트 ───────────────────────────────────────────────
     backtest_start: str = "2019-01-01"
     backtest_end:   str = "2024-12-31"
@@ -134,24 +142,20 @@ class AdvisorConfig:
         "Real Estate":             2.0,
     })
 
-    # ── 종목 풀 (실제 운용: Russell 1000 / KOSPI 200 전종목 권장) ──
+    # ── 종목 풀 ────────────────────────────────────────────────
+    # Twelve Data 무료 분당 8회 제한 → 미국 풀을 20개로 축소
+    # 한국은 무료 플랜에서 statistics 미지원 → yfinance fallback으로 시도
     us_pool: List[str] = field(default_factory=lambda: [
-        # 빅테크
+        # 빅테크 / 인터넷 (7)
         "AAPL", "MSFT", "GOOGL", "META", "NVDA", "AMZN", "TSLA",
-        # 금융
-        "JPM", "V", "MA", "BRK-B", "GS", "BAC", "MS",
-        # 헬스케어
-        "UNH", "JNJ", "LLY", "ABBV", "MRK", "PFE", "TMO",
-        # 소비재 (필수)
-        "PG", "KO", "COST", "WMT", "MCD", "PEP", "CL",
-        # 산업재
-        "CAT", "DE", "HON", "LMT", "RTX", "GE", "UPS",
-        # 에너지
-        "XOM", "CVX", "COP", "SLB",
-        # 유틸리티
-        "NEE", "DUK", "SO",
-        # 리츠
-        "AMT", "PLD", "EQIX",
+        # 금융 (3)
+        "JPM", "V", "MA",
+        # 헬스케어 (3)
+        "UNH", "JNJ", "LLY",
+        # 소비재 (4)
+        "COST", "WMT", "PG", "KO",
+        # 산업/에너지/홈디포 (3)
+        "HD", "XOM", "BRK-B",
     ])
 
     kr_pool: List[str] = field(default_factory=lambda: [
@@ -165,9 +169,41 @@ class AdvisorConfig:
         "006400.KS",  # 삼성SDI
         "035720.KS",  # 카카오
         "000270.KS",  # 기아
-        "096770.KS",  # SK이노베이션
-        "028260.KS",  # 삼성물산
-        "017670.KS",  # SK텔레콤
-        "030200.KS",  # KT
-        "066570.KS",  # LG전자
     ])
+
+    # ── 종목 메타 (Twelve Data profile 호출 절약) ──────────────
+    # ticker → {"name": ..., "sector": ...}
+    stock_meta: Dict[str, Dict[str, str]] = field(default_factory=lambda: {
+        # 미국
+        "AAPL":  {"name": "Apple Inc.",            "sector": "Technology"},
+        "MSFT":  {"name": "Microsoft Corp.",       "sector": "Technology"},
+        "GOOGL": {"name": "Alphabet Inc.",         "sector": "Communication Services"},
+        "META":  {"name": "Meta Platforms",        "sector": "Communication Services"},
+        "NVDA":  {"name": "NVIDIA Corp.",          "sector": "Technology"},
+        "AMZN":  {"name": "Amazon.com",            "sector": "Consumer Cyclical"},
+        "TSLA":  {"name": "Tesla Inc.",            "sector": "Consumer Cyclical"},
+        "JPM":   {"name": "JPMorgan Chase",        "sector": "Financial Services"},
+        "V":     {"name": "Visa Inc.",             "sector": "Financial Services"},
+        "MA":    {"name": "Mastercard",            "sector": "Financial Services"},
+        "UNH":   {"name": "UnitedHealth Group",    "sector": "Healthcare"},
+        "JNJ":   {"name": "Johnson & Johnson",     "sector": "Healthcare"},
+        "LLY":   {"name": "Eli Lilly",             "sector": "Healthcare"},
+        "COST":  {"name": "Costco Wholesale",      "sector": "Consumer Defensive"},
+        "WMT":   {"name": "Walmart Inc.",          "sector": "Consumer Defensive"},
+        "PG":    {"name": "Procter & Gamble",      "sector": "Consumer Defensive"},
+        "KO":    {"name": "Coca-Cola Co.",         "sector": "Consumer Defensive"},
+        "HD":    {"name": "Home Depot",            "sector": "Consumer Cyclical"},
+        "XOM":   {"name": "Exxon Mobil",           "sector": "Energy"},
+        "BRK-B": {"name": "Berkshire Hathaway B",  "sector": "Financial Services"},
+        # 한국 (yfinance 사용)
+        "005930.KS": {"name": "Samsung Electronics",  "sector": "Technology"},
+        "000660.KS": {"name": "SK hynix",             "sector": "Technology"},
+        "005490.KS": {"name": "POSCO Holdings",       "sector": "Basic Materials"},
+        "035420.KS": {"name": "NAVER Corp.",          "sector": "Communication Services"},
+        "005380.KS": {"name": "Hyundai Motor",        "sector": "Consumer Cyclical"},
+        "068270.KS": {"name": "Celltrion",            "sector": "Healthcare"},
+        "051910.KS": {"name": "LG Chem",              "sector": "Basic Materials"},
+        "006400.KS": {"name": "Samsung SDI",          "sector": "Technology"},
+        "035720.KS": {"name": "Kakao Corp.",          "sector": "Communication Services"},
+        "000270.KS": {"name": "Kia Corp.",            "sector": "Consumer Cyclical"},
+    })

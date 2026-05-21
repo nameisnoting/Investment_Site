@@ -9,10 +9,12 @@ advisor.py — 실시간 투자 추천 엔진 (v3)
 """
 
 import logging
+import time
 from typing import List, Optional
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 
 from config import AdvisorConfig, apply_unemployed_mode
@@ -28,8 +30,11 @@ logger = logging.getLogger(__name__)
 
 class DataFetcher:
 
-    def __init__(self, cache: DataCache):
+    def __init__(self, cache: DataCache, cfg: Optional[AdvisorConfig] = None):
         self.cache = cache
+        self.cfg = cfg or AdvisorConfig()
+        # Twelve Data 분당 8회 제한 → 마지막 호출 시각 기록해 throttle
+        self._last_td_call: float = 0.0
 
     def history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         key = self.cache.make_key("hist", ticker, period)
@@ -51,18 +56,98 @@ class DataFetcher:
         return pd.DataFrame()
 
     def info(self, ticker: str) -> dict:
+        """
+        펀더멘털 정보 (ROE, PBR, PER, FCF 등).
+          미국 종목 + TWELVE_DATA_KEY 설정 → Twelve Data API 사용 (안정)
+          한국 종목 (.KS/.KQ) 또는 키 없음 → yfinance fallback
+        반환 dict는 yfinance info와 호환되는 키 사용 (Screener 코드 무수정).
+        """
         key = self.cache.make_key("info", ticker)
         cached = self.cache.get(key)
         if cached is not None:
             return cached
+
+        is_korean = ticker.endswith(".KS") or ticker.endswith(".KQ")
+        use_td = bool(self.cfg.twelve_data_key) and not is_korean
+
+        info: dict = {}
+        if use_td:
+            info = self._info_twelve_data(ticker)
+            if not info:
+                logger.info(f"{ticker}: Twelve Data 실패 → yfinance fallback")
+                info = self._info_yfinance(ticker)
+        else:
+            info = self._info_yfinance(ticker)
+
+        # 종목 풀 메타에서 name/sector 보충 (Twelve Data /profile 절약)
+        meta = self.cfg.stock_meta.get(ticker)
+        if meta:
+            info.setdefault("longName",  meta.get("name", ticker))
+            info.setdefault("shortName", meta.get("name", ticker))
+            info.setdefault("sector",    meta.get("sector", "Unknown"))
+
+        if info:
+            self.cache.set(key, info)
+        return info
+
+    def _info_yfinance(self, ticker: str) -> dict:
         try:
             info = yf.Ticker(ticker).info
-            if info:
-                self.cache.set(key, info)
             return info or {}
         except Exception as e:
-            logger.warning(f"info 다운로드 실패 ({ticker}): {e}")
+            logger.warning(f"yfinance info 실패 ({ticker}): {e}")
             return {}
+
+    def _info_twelve_data(self, ticker: str) -> dict:
+        """
+        Twelve Data /statistics → yfinance info와 호환되는 dict로 변환.
+        무료 플랜 분당 8회 throttle 적용.
+        """
+        # ── throttle (분당 8회) ──
+        wait = self.cfg.twelve_data_throttle_seconds - (time.time() - self._last_td_call)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_td_call = time.time()
+
+        try:
+            r = requests.get(
+                f"{self.cfg.twelve_data_url}/statistics",
+                params={"symbol": ticker, "apikey": self.cfg.twelve_data_key},
+                timeout=15,
+            )
+            data = r.json()
+        except Exception as e:
+            logger.warning(f"Twelve Data 호출 실패 ({ticker}): {e}")
+            return {}
+
+        if not isinstance(data, dict) or data.get("status") == "error":
+            logger.warning(f"Twelve Data 응답 오류 ({ticker}): {data.get('message') if isinstance(data, dict) else data}")
+            return {}
+
+        stats = data.get("statistics", {})
+        val   = stats.get("valuations_metrics", {})
+        fin   = stats.get("financials", {})
+        inc   = fin.get("income_statement", {})
+        bal   = fin.get("balance_sheet", {})
+        cfl   = fin.get("cash_flow", {})
+
+        # Twelve Data → yfinance info 키 매핑
+        # debt_to_equity는 yfinance 관행상 %단위 (예: 79.548) — 동일 형식
+        return {
+            "returnOnEquity":    fin.get("return_on_equity_ttm"),     # 이미 ratio
+            "priceToBook":       val.get("price_to_book_mrq"),
+            "trailingPE":        val.get("trailing_pe"),
+            "forwardPE":         val.get("forward_pe"),
+            "debtToEquity":      bal.get("total_debt_to_equity_mrq"),
+            "currentRatio":      bal.get("current_ratio_mrq"),
+            "marketCap":         val.get("market_capitalization"),
+            "revenueGrowth":     inc.get("quarterly_revenue_growth"),
+            "profitMargins":     fin.get("profit_margin"),
+            "operatingMargins":  fin.get("operating_margin"),
+            "pegRatio":          val.get("peg_ratio"),
+            "freeCashflow":      cfl.get("levered_free_cash_flow_ttm"),
+            "totalRevenue":      inc.get("revenue_ttm"),
+        }
 
     def stockholders_equity(self, ticker: str) -> Optional[float]:
         """
@@ -905,7 +990,7 @@ class InvestmentAdvisor:
 
         self.cfg      = base_cfg
         cache         = DataCache(self.cfg.cache_dir, self.cfg.cache_ttl_hours)
-        fetcher       = DataFetcher(cache)
+        fetcher       = DataFetcher(cache, self.cfg)
         self.macro    = MacroFilter(fetcher, self.cfg)
         self.screener = Screener(fetcher, self.cfg)
         self.portcons = PortfolioConstructor(self.cfg)
