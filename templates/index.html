@@ -13,9 +13,17 @@
       <div class="kebab-wrap">
         <button type="button" id="kebab-btn" class="kebab-btn" aria-label="저장된 포트폴리오">⋮</button>
         <div id="kebab-menu" class="kebab-menu" hidden>
-          <div class="kebab-header">📂 저장된 포트폴리오</div>
+          <div class="kebab-header">
+            <span>📂 저장된 포트폴리오</span>
+            <span id="kebab-count" class="kebab-count">0/20</span>
+          </div>
           <div id="kebab-list" class="kebab-list">
             <div class="kebab-empty">저장된 항목 없음</div>
+          </div>
+          <div id="kebab-pager" class="kebab-pager" hidden>
+            <button type="button" id="kebab-prev" class="pager-btn" aria-label="이전 페이지">◀</button>
+            <span id="kebab-pager-info" class="pager-info">1 / 1</span>
+            <button type="button" id="kebab-next" class="pager-btn" aria-label="다음 페이지">▶</button>
           </div>
           <div id="kebab-clear-wrap" class="kebab-clear-wrap" hidden>
             <button type="button" id="kebab-clear" class="kebab-clear">전체 삭제</button>
@@ -25,6 +33,14 @@
     </div>
 
     <form id="asset-form" class="form" autocomplete="off">
+      <!-- 포트폴리오 이름 (선택) — 비우면 자동으로 "포트폴리오 A" 부여 -->
+      <div class="row name-row">
+        <label for="port_name">이름</label>
+        <div class="input-wrap">
+          <input type="text" id="port_name" maxlength="30" placeholder="포트폴리오 이름 (비우면 자동)" />
+        </div>
+      </div>
+
       <div class="row">
         <label for="cash">보유 현금</label>
         <div class="input-wrap">
@@ -106,6 +122,20 @@
           <input type="text" id="total_assets" inputmode="numeric" readonly />
           <span class="unit">원</span>
         </div>
+      </div>
+
+      <!-- 포트폴리오 성향 (전략) — 4가지 모드 -->
+      <div class="strategy-row">
+        <label for="strategy" class="strategy-label">포트폴리오 성향</label>
+        <select id="strategy" class="strategy-select">
+          <option value="long_term" selected>장기투자 (추천)</option>
+          <option value="surge">폭등시그널</option>
+          <option value="momentum">모멘텀 추종</option>
+          <option value="mixed">혼합</option>
+        </select>
+        <p id="strategy-desc" class="strategy-desc">
+          5년~10년 이상 장기투자에 적합한 포트폴리오를 구상합니다.
+        </p>
       </div>
 
       <div class="risk-row">

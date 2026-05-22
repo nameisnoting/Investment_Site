@@ -66,6 +66,11 @@ def derive_profile_and_cfg(data: Dict[str, Any]):
     risk_level = int(data.get("risk_level", 3) or 3)
     risk_level = max(1, min(risk_level, 5))
 
+    # 포트폴리오 전략 (Phase A에선 수신만, Phase B/C/D에서 분기 적용)
+    strategy = str(data.get("strategy", "long_term")).lower()
+    if strategy not in ("long_term", "surge", "momentum", "mixed"):
+        strategy = "long_term"
+
     # ── 고용 상태 분기 ────────────────────────────────────────
     if not has_income:
         status = "unemployed"
@@ -131,7 +136,7 @@ def derive_profile_and_cfg(data: Dict[str, Any]):
     adjusted = max(0.10, min(cfg.core_ratio * core_mult, 0.95))
     cfg = replace(cfg, core_ratio=adjusted)
 
-    return profile, cfg, tier, current_invest, monthly_income, risk_level, deposit_keep_amount
+    return profile, cfg, tier, current_invest, monthly_income, risk_level, deposit_keep_amount, strategy
 
 
 # ──────────────────────────────────────────────────────────────
@@ -207,7 +212,7 @@ def index():
 @app.route("/api/advise", methods=["POST"])
 def advise():
     data = request.get_json(force=True, silent=True) or {}
-    profile, cfg, tier, current_invest, monthly_income, risk_level, deposit_keep_amount = \
+    profile, cfg, tier, current_invest, monthly_income, risk_level, deposit_keep_amount, strategy = \
         derive_profile_and_cfg(data)
 
     advisor = InvestmentAdvisor(cfg, profile)
@@ -240,6 +245,7 @@ def advise():
                 "usd_krw_rate": profile.usd_krw_rate,
                 "risk_level": risk_level,
                 "deposit_keep_amount": deposit_keep_amount,
+                "strategy": strategy,
             },
             "us_regime": _serialize_regime(us_regime),
             "kr_regime": _serialize_regime(kr_regime),

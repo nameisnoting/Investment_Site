@@ -5,14 +5,51 @@
   const kebabBtn = document.getElementById("kebab-btn");
   const kebabMenu = document.getElementById("kebab-menu");
   const kebabList = document.getElementById("kebab-list");
+  const kebabCount = document.getElementById("kebab-count");
+  const kebabPager = document.getElementById("kebab-pager");
+  const kebabPrev = document.getElementById("kebab-prev");
+  const kebabNext = document.getElementById("kebab-next");
+  const kebabPagerInfo = document.getElementById("kebab-pager-info");
   const kebabClearWrap = document.getElementById("kebab-clear-wrap");
   const kebabClear = document.getElementById("kebab-clear");
+  const portNameInput = document.getElementById("port_name");
+  const strategySelect = document.getElementById("strategy");
+  const strategyDesc = document.getElementById("strategy-desc");
 
   const ASSET_FIELDS = ["cash", "deposits", "savings", "retirement", "current_invest"];
 
-  const STORAGE_KEY = "asset_portfolios_v1";
-  const MAX_SAVED = 5;
-  const LABEL_CHARS = ["A", "B", "C", "D", "E"];
+  // 저장 schema v2로 마이그레이션 (name/strategy 필드 추가)
+  const STORAGE_KEY = "asset_portfolios_v2";
+  const OLD_STORAGE_KEY = "asset_portfolios_v1";
+  const MAX_SAVED = 20;
+  const PAGE_SIZE = 5;
+  // 20개 라벨 (A ~ T)
+  const LABEL_CHARS = "ABCDEFGHIJKLMNOPQRST".split("");
+
+  const STRATEGY_LABEL = {
+    long_term: "장기투자",
+    surge:     "폭등시그널",
+    momentum:  "모멘텀",
+    mixed:     "혼합",
+  };
+
+  const STRATEGY_DESC = {
+    long_term: { text: "5년~10년 이상 장기투자에 적합한 포트폴리오를 구상합니다.", cls: "" },
+    surge:     { text: "중단기 투자에 적합한 포트폴리오를 구상합니다. 리스크가 크기 때문에 주의가 필요합니다.", cls: "warn" },
+    momentum:  { text: "단기 트레이딩에 적합한 포트폴리오를 구상합니다. 리스크가 매우 크기 때문에 소량의 자산만 투입하는 것을 추천드립니다.", cls: "bad" },
+    mixed:     { text: "중장단기 종목을 적절히 혼합하여 포트폴리오를 구상합니다.", cls: "" },
+  };
+
+  let currentPage = 0;   // 0-indexed
+
+  function syncStrategyDesc() {
+    const v = strategySelect.value;
+    const d = STRATEGY_DESC[v] || STRATEGY_DESC.long_term;
+    strategyDesc.textContent = d.text;
+    strategyDesc.className = "strategy-desc" + (d.cls ? " " + d.cls : "");
+  }
+  strategySelect.addEventListener("change", syncStrategyDesc);
+  syncStrategyDesc();
 
   const RISK_LABELS = {
     1: "안정적",
@@ -92,6 +129,8 @@
       has_income:         document.querySelector('input[name="has_income"]:checked').value,
       monthly_income:     parseNum(monthlyIncomeInput.value),
       risk_level:         parseInt(riskInput.value, 10) || 3,
+      strategy:           strategySelect.value || "long_term",
+      port_name:          (portNameInput.value || "").trim(),
     };
 
     submitBtn.disabled = true;
@@ -127,9 +166,26 @@
   function loadSaved() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      }
+      // v1 마이그레이션: 기존 5개짜리 데이터 살리기
+      const oldRaw = localStorage.getItem(OLD_STORAGE_KEY);
+      if (oldRaw) {
+        const old = JSON.parse(oldRaw);
+        if (Array.isArray(old)) {
+          const migrated = old.map(e => ({
+            ...e,
+            name: null,            // 자동이름 부여 대상
+            isCustomName: false,
+            strategy: e.input?.strategy || "long_term",
+          }));
+          writeSaved(migrated);
+          return migrated;
+        }
+      }
+      return [];
     } catch {
       return [];
     }
@@ -143,11 +199,50 @@
     }
   }
 
+  // 자동이름 부여: 살아있는 자동이름 중 빠진 첫 알파벳, 없으면 다음 새 알파벳
+  function nextAutoName(arr) {
+    const usedAutoLabels = new Set(
+      arr.filter(e => !e.isCustomName && e.name)
+         .map(e => e.name.replace(/^포트폴리오\s*/, ""))
+    );
+    for (const c of LABEL_CHARS) {
+      if (!usedAutoLabels.has(c)) return `포트폴리오 ${c}`;
+    }
+    // A~T 모두 차면 (FIFO로 자리 비울 거라 거의 발생 안 함)
+    return `포트폴리오 ${LABEL_CHARS[arr.length % LABEL_CHARS.length]}`;
+  }
+
   function savePortfolio(input, result) {
     const arr = loadSaved();
-    arr.push({ savedAt: Date.now(), input, result });
-    while (arr.length > MAX_SAVED) arr.shift();   // 오래된 것부터 제거 (FIFO)
+    const customName = (input.port_name || "").trim();
+
+    // 20개 가득 차면 가장 오래된 거 제거 (FIFO)
+    while (arr.length >= MAX_SAVED) arr.shift();
+
+    arr.push({
+      savedAt:      Date.now(),
+      name:         customName || nextAutoName(arr),
+      isCustomName: !!customName,
+      strategy:     input.strategy || "long_term",
+      input,
+      result,
+    });
     writeSaved(arr);
+
+    // 마지막 페이지로 이동 (방금 저장한 항목 보이도록)
+    const totalPages = Math.max(1, Math.ceil(arr.length / PAGE_SIZE));
+    currentPage = totalPages - 1;
+    renderKebabList();
+  }
+
+  function deleteEntry(idx) {
+    const arr = loadSaved();
+    if (idx < 0 || idx >= arr.length) return;
+    arr.splice(idx, 1);
+    writeSaved(arr);
+    // 빈 페이지로 가지 않게 보정
+    const totalPages = Math.max(1, Math.ceil(arr.length / PAGE_SIZE));
+    if (currentPage >= totalPages) currentPage = totalPages - 1;
     renderKebabList();
   }
 
@@ -162,19 +257,45 @@
 
   function renderKebabList() {
     const arr = loadSaved();
+    kebabCount.textContent = `${arr.length}/${MAX_SAVED}`;
+
     if (arr.length === 0) {
       kebabList.innerHTML = `<div class="kebab-empty">저장된 항목 없음</div>`;
       kebabClearWrap.hidden = true;
+      kebabPager.hidden = true;
       return;
     }
-    kebabList.innerHTML = arr.map((entry, idx) => {
-      const label = LABEL_CHARS[idx] || `?${idx}`;
+
+    const totalPages = Math.ceil(arr.length / PAGE_SIZE);
+    if (currentPage >= totalPages) currentPage = totalPages - 1;
+    if (currentPage < 0) currentPage = 0;
+
+    const start = currentPage * PAGE_SIZE;
+    const end   = Math.min(start + PAGE_SIZE, arr.length);
+
+    kebabList.innerHTML = arr.slice(start, end).map((entry, localIdx) => {
+      const globalIdx = start + localIdx;
+      const name = entry.name || `포트폴리오 ${LABEL_CHARS[globalIdx] || "?"}`;
+      const strategy = entry.strategy || "long_term";
+      const strategyLabel = STRATEGY_LABEL[strategy] || strategy;
       return `
-        <div class="kebab-item" data-idx="${idx}">
-          <span class="label">포트폴리오 ${label}</span>
-          <span class="meta">${fmtDate(entry.savedAt)}</span>
+        <div class="kebab-item" data-idx="${globalIdx}">
+          <div class="label-wrap">
+            <span class="label">${escape(name)}</span>
+            <span class="meta">
+              <span class="strategy-tag ${escape(strategy)}">${escape(strategyLabel)}</span>
+              ${fmtDate(entry.savedAt)}
+            </span>
+          </div>
+          <button type="button" class="item-delete" data-del="${globalIdx}" aria-label="삭제">✕</button>
         </div>`;
     }).join("");
+
+    // 페이지네이션
+    kebabPager.hidden = (totalPages <= 1);
+    kebabPagerInfo.textContent = `${currentPage + 1} / ${totalPages}`;
+    kebabPrev.disabled = (currentPage === 0);
+    kebabNext.disabled = (currentPage >= totalPages - 1);
     kebabClearWrap.hidden = false;
   }
 
@@ -193,6 +314,8 @@
     setField("current_invest",     input.current_invest);
     setField("monthly_income",     input.monthly_income);
 
+    portNameInput.value = input.port_name || "";
+
     const incomeRadio = document.querySelector(
       `input[name="has_income"][value="${input.has_income || "yes"}"]`
     );
@@ -203,6 +326,10 @@
     if (input.risk_level) {
       riskInput.value = String(input.risk_level);
       syncRiskLabel();
+    }
+    if (input.strategy) {
+      strategySelect.value = input.strategy;
+      syncStrategyDesc();
     }
   }
 
@@ -233,15 +360,36 @@
   });
 
   kebabList.addEventListener("click", (e) => {
+    // 개별 삭제 버튼 우선
+    const delBtn = e.target.closest(".item-delete");
+    if (delBtn) {
+      e.stopPropagation();
+      const idx = parseInt(delBtn.dataset.del, 10);
+      if (Number.isFinite(idx)) deleteEntry(idx);
+      return;
+    }
+    // 아니면 카드 클릭 → 복원
     const item = e.target.closest(".kebab-item");
     if (!item) return;
     const idx = parseInt(item.dataset.idx, 10);
     if (Number.isFinite(idx)) restoreEntry(idx);
   });
 
+  kebabPrev.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (currentPage > 0) { currentPage--; renderKebabList(); }
+  });
+  kebabNext.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const arr = loadSaved();
+    const totalPages = Math.ceil(arr.length / PAGE_SIZE);
+    if (currentPage < totalPages - 1) { currentPage++; renderKebabList(); }
+  });
+
   kebabClear.addEventListener("click", () => {
     if (!confirm("저장된 포트폴리오를 모두 삭제할까요?")) return;
     localStorage.removeItem(STORAGE_KEY);
+    currentPage = 0;
     renderKebabList();
   });
 
