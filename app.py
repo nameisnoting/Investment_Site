@@ -262,8 +262,58 @@ def advise():
             return jsonify(result_payload)
 
         # ──────────────────────────────────────────────────────
-        # 전략 분기: long_term (기존) / surge (Phase B) / 추후 momentum / mixed
+        # 전략 분기: long_term (기존) / surge (Phase B) / momentum (Phase C) / mixed (Phase D)
         # ──────────────────────────────────────────────────────
+        if strategy == "momentum":
+            # ── 모멘텀 추종 모드 (단기 트레이딩) ────────────
+            # 베이스 풀: us_pool + surge_pool 합집합 (43종목)
+            base_pool = list(set(advisor.cfg.us_pool + advisor.cfg.surge_pool))
+            mom_scored = [s for t in base_pool
+                          if (s := advisor.screener.score_momentum(t, "US"))]
+            # QQQ만 코어
+            qqq_meta = next((e for e in advisor.cfg.core_etf_pool if e["ticker"] == "QQQ"), None)
+            qqq_scored = []
+            if qqq_meta:
+                qs = advisor.screener.score_etf("QQQ", qqq_meta["name"])
+                if qs:
+                    qqq_scored = [qs]
+
+            if not mom_scored:
+                result_payload["message"] = (
+                    "모멘텀 통과 종목이 없음 (30일 +15% 이상 필요). "
+                    "시장 추세가 약하면 흔한 결과 — 현금 비중 유지 권장."
+                )
+                return jsonify(result_payload)
+
+            portfolio = advisor.portcons.construct_momentum(
+                mom_scored, qqq_scored, us_regime, risk_level
+            )
+            advisor._fill_invest_amounts(portfolio)
+
+            result_payload["portfolio"] = {
+                "equity_ratio":  portfolio["equity_ratio"],
+                "cash_pct":      portfolio["cash_pct"],
+                "core_budget":   portfolio["core_budget"],
+                "leverage_budget": 0.0,
+                "us_budget":     portfolio["us_budget"],
+                "kr_budget":     0.0,
+                "core_etfs":     [_serialize_stock(s) for s in portfolio["core_etfs"]],
+                "leverage_etfs": [],
+                "us_stocks":     [_serialize_stock(s) for s in portfolio["us_stocks"]],
+                "kr_stocks":     [],
+                "core_ratio":    0.25,
+                "dca_months":    advisor.cfg.dca_months,
+                "screened": {
+                    "us_total":  len(base_pool),
+                    "us_passed": len(mom_scored),
+                    "kr_total":  0,
+                    "kr_passed": 0,
+                    "core_total":  1,
+                    "core_passed": len(qqq_scored),
+                },
+            }
+            return jsonify(result_payload)
+
         if strategy == "surge":
             # ── 폭등시그널 모드 ─────────────────────────────
             surge_scored = [s for t in advisor.cfg.surge_pool

@@ -734,6 +734,168 @@ class Screener:
             confidence=0.50,
         )
 
+    # ==============================================================
+    # 모멘텀 추종 평가 (Phase C)
+    # ==============================================================
+
+    def score_momentum(self, ticker: str, country: str = "US") -> Optional[StockScore]:
+        """
+        모멘텀 추종 (Phase C) — 단기 트레이딩 용.
+        가격 데이터만 사용 (펀더멘털 무관, info 호출 안 함 → 빠름).
+
+        점수 (총 100):
+          - 20일 모멘텀 30점 (핵심)
+          - 5일 모멘텀  20점 (초단기)
+          - RSI 강도   25점 (60~85가 만점, 과매수도 OK)
+          - 거래량 증가 15점 (20일 평균 대비 1.5배+)
+          - MA20 위    10점 (단기 추세 라인 위)
+
+        1차 필터: 30일 모멘텀 +15% 미만이면 풀에서 제외
+        """
+        try:
+            df = self.fetcher.history(ticker, period="6mo")
+            if df.empty or len(df) < 60:
+                return None
+            close = df["Close"].squeeze()
+            volume = df["Volume"].squeeze() if "Volume" in df.columns else None
+
+            cur = float(close.iloc[-1])
+            # 30일 모멘텀 (1차 필터)
+            mom30 = (cur - float(close.iloc[-30])) / float(close.iloc[-30])
+            if mom30 < 0.15:
+                logger.info(f"{ticker}: 30일 모멘텀 {mom30*100:+.1f}% < 15% → momentum 스킵")
+                return None
+
+            # 20일 모멘텀
+            mom20 = (cur - float(close.iloc[-20])) / float(close.iloc[-20])
+            # 5일 모멘텀
+            mom5  = (cur - float(close.iloc[-5])) / float(close.iloc[-5])
+
+            # RSI(14)
+            delta = close.diff()
+            gain  = delta.where(delta > 0, 0.0).rolling(14).mean()
+            loss  = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+            rsi   = float((100 - 100 / (1 + gain / loss.replace(0, np.nan))).iloc[-1])
+
+            # MA20
+            ma20 = float(close.rolling(20).mean().iloc[-1])
+            above_ma20 = cur > ma20
+
+            # 거래량
+            vol_ratio = 0.0
+            if volume is not None and len(volume) >= 20:
+                avg_vol = float(volume.iloc[-20:].mean())
+                cur_vol = float(volume.iloc[-1])
+                if avg_vol > 0:
+                    vol_ratio = cur_vol / avg_vol
+
+            # ── 점수 ─────────────────────────────────────
+            # 20일 모멘텀 (30점)
+            if   mom20 > 0.30: m20_s = 30
+            elif mom20 > 0.20: m20_s = 25
+            elif mom20 > 0.10: m20_s = 18
+            elif mom20 > 0.05: m20_s = 10
+            else:              m20_s = 3
+
+            # 5일 모멘텀 (20점)
+            if   mom5 > 0.10:  m5_s = 20
+            elif mom5 > 0.05:  m5_s = 15
+            elif mom5 > 0.00:  m5_s = 8
+            else:              m5_s = 0
+
+            # RSI 강도 (25점) — 과매수(70+)에 보너스, 단 90+는 감점
+            if   rsi >= 90:    rsi_s = 5
+            elif rsi >= 80:    rsi_s = 18
+            elif rsi >= 70:    rsi_s = 25   # sweet spot
+            elif rsi >= 60:    rsi_s = 20
+            elif rsi >= 50:    rsi_s = 12
+            else:              rsi_s = 0
+
+            # 거래량 (15점)
+            if   vol_ratio >= 3.0: vol_s = 15
+            elif vol_ratio >= 2.0: vol_s = 12
+            elif vol_ratio >= 1.5: vol_s = 8
+            elif vol_ratio >= 1.0: vol_s = 3
+            else:                  vol_s = 0
+
+            # MA20 위 (10점)
+            ma_s = 10 if above_ma20 else 0
+
+            total = m20_s + m5_s + rsi_s + vol_s + ma_s
+
+            entry_plan = self._make_momentum_entry_plan(
+                cur=cur, rsi=rsi, mom20=mom20, mom5=mom5, vol_ratio=vol_ratio,
+            )
+
+            meta = self.cfg.stock_meta.get(ticker, {})
+            return StockScore(
+                ticker=ticker,
+                name=meta.get("name", ticker),
+                country=country,
+                sector=meta.get("sector", "Unknown"),
+                roe=None, pbr=None, per=None, debt_to_equity=None,
+                fundamental_score=0.0,
+                rsi=round(rsi, 1),
+                trend_score=1.0 if above_ma20 else 0.5,
+                momentum_pct=round(mom20 * 100, 2),
+                technical_score=round(total, 1),
+                composite_score=round(total, 1),
+                entry_signal=(mom20 > 0.10 and rsi >= 60),
+                entry_plan=entry_plan,
+                pbr_source="missing",
+                per_source="missing",
+                fcf_margin=None, operating_margin=None, peg=None,
+            )
+        except Exception as e:
+            logger.warning(f"{ticker} momentum 평가 실패: {e}")
+            return None
+
+    def _make_momentum_entry_plan(self, cur: float, rsi: float, mom20: float,
+                                   mom5: float, vol_ratio: float) -> EntryPlan:
+        """모멘텀 종목 진입 플랜 — 손절선 명시"""
+        # RSI 90+ + 5일 모멘텀 둔화 → 꼭지 가능성
+        if rsi >= 90 and mom5 < 0.02:
+            return EntryPlan(
+                action="AVOID", label="진입 보류 (꼭지 가능)",
+                rationale=f"극단 과매수(RSI {rsi:.1f}) + 5일 모멘텀 둔화 — 꼭지 신호",
+                current_price=round(cur, 2),
+                target_levels=[], confidence=0.30,
+            )
+        # 거래량 폭발 + 강한 모멘텀 → 즉시 추종
+        if vol_ratio >= 2.0 and mom20 > 0.15:
+            stop_loss = round(cur * 0.93, 2)  # -7% 손절
+            return EntryPlan(
+                action="MOMENTUM_RIDE", label="추세 추종 매수",
+                rationale=(f"모멘텀 {mom20*100:+.1f}% + 거래량 {vol_ratio:.1f}배 — "
+                           f"강한 추세 (손절선 {stop_loss})"),
+                current_price=round(cur, 2),
+                target_levels=[(round(cur, 2), 100.0)],
+                confidence=0.75,
+            )
+        # 일반 추종
+        if mom20 > 0.10 and rsi >= 55:
+            stop_loss = round(cur * 0.93, 2)
+            return EntryPlan(
+                action="MOMENTUM_RIDE", label="추세 추종 매수",
+                rationale=(f"모멘텀 {mom20*100:+.1f}%, RSI {rsi:.1f} — "
+                           f"추세 진행 중 (손절선 {stop_loss})"),
+                current_price=round(cur, 2),
+                target_levels=[(round(cur, 2), 100.0)],
+                confidence=0.65,
+            )
+        # 약한 신호 → 분할
+        return EntryPlan(
+            action="SPLIT_BUY", label="분할 매수",
+            rationale=f"신호 약함 (모멘텀 {mom20*100:+.1f}%) — 보수적 분할",
+            current_price=round(cur, 2),
+            target_levels=[
+                (round(cur, 2),        50.0),
+                (round(cur * 0.97, 2), 25.0),
+                (round(cur * 0.94, 2), 25.0),
+            ],
+            confidence=0.45,
+        )
+
     def score(self, ticker: str, country: str = "US") -> Optional[StockScore]:
         try:
             info   = self.fetcher.info(ticker)
@@ -1131,6 +1293,59 @@ class PortfolioConstructor:
             w = weight_map.get(s.ticker, 0) / total_w
             s.weight_pct = round(w * budget, 2)
         return etfs
+
+    # ── 모멘텀 추종 모드 포트폴리오 구성 ──────────────────────
+    # 단기 트레이딩이라 현금 비중 강제 ↑ (변동성 노출 제한)
+    MOMENTUM_CASH_TABLE = {1: 0.50, 2: 0.40, 3: 0.30, 4: 0.22, 5: 0.15}
+
+    def construct_momentum(
+        self,
+        momentum_candidates: List[StockScore],
+        core_etfs: List[StockScore],        # QQQ만
+        us_regime: MarketRegime,
+        risk_level: int,
+    ) -> dict:
+        """모멘텀 추종 모드: QQQ 코어 + 모멘텀 통과 종목 (현금 비중 高)"""
+        cash_ratio   = self.MOMENTUM_CASH_TABLE.get(risk_level, 0.30)
+        equity_ratio = 1.0 - cash_ratio
+
+        # 시장 약세(composite<0.4) 시 현금 비중 +20%p 강제
+        if us_regime.composite_score < 0.4:
+            cash_ratio = min(cash_ratio + 0.20, 0.80)
+            equity_ratio = 1.0 - cash_ratio
+
+        invest_total = 100.0 * equity_ratio
+
+        # 코어 QQQ는 작게 (전체 투자분의 25%), 나머지 75%는 모멘텀 종목
+        core_budget      = invest_total * 0.25
+        satellite_budget = invest_total * 0.75
+
+        core_final = self._allocate_core(core_etfs, core_budget,
+                                          pool_override=[{"ticker": "QQQ", "weight": 1.0}])
+
+        # 위성: 점수 비례, 단일종목 상한
+        ranked   = sorted(momentum_candidates, key=lambda x: x.composite_score, reverse=True)
+        selected = ranked[:self.cfg.top_n]
+        total_score = sum(s.composite_score for s in selected) or 1.0
+        for s in selected:
+            raw = (s.composite_score / total_score) * satellite_budget
+            s.weight_pct = round(min(raw, satellite_budget * self.cfg.single_stock_cap), 2)
+        allocated = sum(s.weight_pct for s in selected)
+        if allocated < satellite_budget and selected:
+            selected[-1].weight_pct = round(selected[-1].weight_pct + (satellite_budget - allocated), 2)
+
+        return {
+            "equity_ratio":  equity_ratio,
+            "cash_pct":      round(cash_ratio * 100, 1),
+            "core_budget":   round(sum(e.weight_pct for e in core_final), 1),
+            "leverage_budget": 0.0,
+            "us_budget":     round(sum(s.weight_pct for s in selected), 1),
+            "kr_budget":     0.0,
+            "core_etfs":     core_final,
+            "leverage_etfs": [],
+            "us_stocks":     selected,
+            "kr_stocks":     [],
+        }
 
     # ── 폭등시그널 모드 포트폴리오 구성 ───────────────────────
     LEVERAGE_RATIO_TABLE = {1: 0.0, 2: 0.05, 3: 0.15, 4: 0.25, 5: 0.30}
