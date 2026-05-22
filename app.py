@@ -20,6 +20,8 @@ app.py — Flask 웹 백엔드
 """
 
 import logging
+import math
+import numbers
 import os
 from dataclasses import replace
 from io import StringIO
@@ -36,6 +38,38 @@ logging.basicConfig(level=logging.WARNING,
                     datefmt="%H:%M:%S")
 
 app = Flask(__name__)
+
+
+# ──────────────────────────────────────────────────────────────
+# NaN/Inf → None 변환 (표준 JSON 호환, 클라이언트 JSON.parse 실패 방지)
+# ──────────────────────────────────────────────────────────────
+
+def _sanitize(obj: Any) -> Any:
+    """
+    dict/list 재귀 순회하며 NaN/Inf인 수치를 None으로 치환.
+    Python float뿐 아니라 numpy.float64 등 모든 Real 타입 처리.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(x) for x in obj]
+    # bool은 Real 인스턴스지만 변환 불필요
+    if isinstance(obj, numbers.Real) and not isinstance(obj, bool):
+        try:
+            f = float(obj)
+            return f if math.isfinite(f) else None
+        except (ValueError, TypeError):
+            return None
+    if isinstance(obj, str):
+        return obj.replace("+nan", "N/A").replace("-nan", "N/A").replace("nan%", "N/A")
+    return obj
+
+
+def safe_jsonify(payload: dict, status: int = 200):
+    """모든 응답 직전 NaN/Inf sanitize 적용한 jsonify."""
+    response = jsonify(_sanitize(payload))
+    response.status_code = status
+    return response
 
 
 # ──────────────────────────────────────────────────────────────
@@ -259,7 +293,7 @@ def advise():
                 f"미국 시장 관망 신호 (VIX {us_regime.vix:.1f}, "
                 f"{us_regime.risk_level}). 현금 100% 유지 권장."
             )
-            return jsonify(result_payload)
+            return safe_jsonify(result_payload)
 
         # ──────────────────────────────────────────────────────
         # 전략 분기: long_term (기존) / surge (Phase B) / momentum (Phase C) / mixed (Phase D)
@@ -341,7 +375,7 @@ def advise():
                     "leverage_passed": surge_sc[7] if surge_sc and len(surge_sc) > 7 else 0,
                 },
             }
-            return jsonify(result_payload)
+            return safe_jsonify(result_payload)
 
         if strategy == "momentum":
             # ── 모멘텀 추종 모드 (단기 트레이딩) ────────────
@@ -362,7 +396,7 @@ def advise():
                     "모멘텀 통과 종목이 없음 (30일 +15% 이상 필요). "
                     "시장 추세가 약하면 흔한 결과 — 현금 비중 유지 권장."
                 )
-                return jsonify(result_payload)
+                return safe_jsonify(result_payload)
 
             portfolio = advisor.portcons.construct_momentum(
                 mom_scored, qqq_scored, us_regime, risk_level
@@ -391,7 +425,7 @@ def advise():
                     "core_passed": len(qqq_scored),
                 },
             }
-            return jsonify(result_payload)
+            return safe_jsonify(result_payload)
 
         if strategy == "surge":
             # ── 폭등시그널 모드 ─────────────────────────────
@@ -404,7 +438,7 @@ def advise():
 
             if not surge_scored and not core_scored:
                 result_payload["message"] = "폭등시그널 통과 종목이 없음."
-                return jsonify(result_payload)
+                return safe_jsonify(result_payload)
 
             portfolio = advisor.portcons.construct_surge(
                 surge_scored, core_scored, leverage_scored, us_regime, risk_level
@@ -435,7 +469,7 @@ def advise():
                     "leverage_passed": len(leverage_scored),
                 },
             }
-            return jsonify(result_payload)
+            return safe_jsonify(result_payload)
 
         # ── 기본: long_term 모드 (mixed / momentum도 일단 여기로 → Phase C/D) ──
         us_scored = [s for t in advisor.cfg.us_pool
@@ -452,7 +486,7 @@ def advise():
                 "현재 기준을 통과한 종목/ETF가 없음. "
                 "VIX 또는 데이터 fetch 상태 점검 필요."
             )
-            return jsonify(result_payload)
+            return safe_jsonify(result_payload)
 
         portfolio = advisor.portcons.construct(us_scored, kr_scored, core_scored,
                                                us_regime, kr_regime)
@@ -478,10 +512,10 @@ def advise():
                 "core_passed": len(core_scored),
             },
         }
-        return jsonify(result_payload)
+        return safe_jsonify(result_payload)
     except Exception as e:
         logging.exception("advise failed")
-        return jsonify({"ok": False, "error": str(e), "log": buf.getvalue()}), 500
+        return safe_jsonify({"ok": False, "error": str(e), "log": buf.getvalue()}, 500)
     finally:
         sys.stdout = orig
 
@@ -521,12 +555,12 @@ def backtest():
     years = max(1, min(years, 10))
 
     if not holdings:
-        return jsonify({"ok": False, "error": "holdings 비어있음"}), 400
+        return safe_jsonify({"ok": False, "error": "holdings 비어있음"}, 400)
 
     # 비중 정규화 (현금/원하는 외 종목만으로 100% 만들기)
     total_w = sum(float(h.get("weight_pct", 0)) for h in holdings)
     if total_w <= 0:
-        return jsonify({"ok": False, "error": "비중 합이 0"}), 400
+        return safe_jsonify({"ok": False, "error": "비중 합이 0"}, 400)
 
     end   = pd.Timestamp.today().normalize()
     start = end - pd.DateOffset(years=years)
@@ -537,10 +571,10 @@ def backtest():
         df = yf.download(tickers, start=start, end=end,
                          progress=False, auto_adjust=True, group_by="ticker")
     except Exception as e:
-        return jsonify({"ok": False, "error": f"yfinance 다운로드 실패: {e}"}), 500
+        return safe_jsonify({"ok": False, "error": f"yfinance 다운로드 실패: {e}"}, 500)
 
     if df.empty:
-        return jsonify({"ok": False, "error": "가격 데이터 없음 (Render에서 yfinance 차단 가능)"}), 500
+        return safe_jsonify({"ok": False, "error": "가격 데이터 없음 (Render에서 yfinance 차단 가능)"}, 500)
 
     # 종목별 종가 시계열 추출
     closes = {}
@@ -564,19 +598,19 @@ def backtest():
             skipped.append(t)
 
     if not closes:
-        return jsonify({"ok": False, "error": "유효한 종목 없음", "skipped": skipped}), 500
+        return safe_jsonify({"ok": False, "error": "유효한 종목 없음", "skipped": skipped}, 500)
 
     # 비중 재정규화 (skipped 제외)
     valid_weights = {t: float(h["weight_pct"]) for t, h in zip(tickers, holdings) if t in closes}
     sum_w = sum(valid_weights.values())
     if sum_w <= 0:
-        return jsonify({"ok": False, "error": "유효 비중 0"}), 500
+        return safe_jsonify({"ok": False, "error": "유효 비중 0"}, 500)
     norm_weights = {t: w / sum_w for t, w in valid_weights.items()}
 
     # 공통 날짜 인덱스 정렬 + forward fill
     price_df = pd.DataFrame({t: s for t, s in closes.items()}).ffill().dropna()
     if price_df.empty or len(price_df) < 30:
-        return jsonify({"ok": False, "error": "공통 가격 데이터 부족"}), 500
+        return safe_jsonify({"ok": False, "error": "공통 가격 데이터 부족"}, 500)
 
     # 일별 수익률
     rets = price_df.pct_change().fillna(0)
@@ -642,7 +676,7 @@ def backtest():
         monthly = series.resample("ME").last().dropna()
         return [[d.strftime("%Y-%m-%d"), round(float(v), 4)] for d, v in monthly.items()]
 
-    return jsonify({
+    return safe_jsonify({
         "ok": True,
         "equity_curve":    downsample(equity_curve),
         "benchmark_curve": downsample(bench_curve) if not bench_curve.empty else [],
