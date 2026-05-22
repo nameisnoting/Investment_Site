@@ -461,14 +461,207 @@
     if (d.portfolio) {
       parts.push(renderPortfolio(d.portfolio, d.profile));
     }
+    // 백테스팅 버튼 (포트폴리오가 있을 때만)
+    if (d.portfolio) {
+      parts.push(`
+        <div class="result-block backtest-block">
+          <h2>📊 백테스팅</h2>
+          <p style="color:var(--text-dim);font-size:12px;margin:0 0 10px;">
+            이 포트폴리오를 N년 전에 같은 비중으로 샀다고 가정하고, 현재까지 buy-and-hold 시뮬레이션.
+            S&P 500 (SPY) 벤치마크와 비교.
+          </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="btn-secondary" data-bt="1">1년</button>
+            <button type="button" class="btn-secondary" data-bt="3">3년</button>
+            <button type="button" class="btn-secondary" data-bt="5">5년</button>
+          </div>
+          <div id="backtest-result"></div>
+        </div>
+      `);
+    }
+
     parts.push(`
       <p class="footnote">
         ⚠️ 본 결과는 참고용이며 투자 책임은 투자자 본인에게 있습니다.<br />
-        🟢 즉시 진입 · 🟡 분할 매수 · 🟠 눌림목 대기 · 🔴 진입 보류<br />
+        🟢 즉시 진입 · 🟡 분할 매수 · 🟠 눌림목 대기 · 🔴 진입 보류 · 🚀 추세 추종 · 🔥 역발상<br />
         PBR <code>*</code> = 재무제표 직접 계산 · PER <code>ᶠ</code> = forward PE
       </p>
     `);
     resultEl.innerHTML = parts.join("");
+
+    // 백테스팅 버튼 이벤트 바인딩
+    if (d.portfolio) {
+      const lastPortfolio = d.portfolio;
+      resultEl.querySelectorAll("[data-bt]").forEach(btn => {
+        btn.addEventListener("click", () => runBacktest(lastPortfolio, parseInt(btn.dataset.bt, 10), btn));
+      });
+    }
+  }
+
+  async function runBacktest(portfolio, years, srcBtn) {
+    // 포트폴리오에서 종목 + 비중 추출
+    const holdings = [];
+    const collect = (arr) => (arr || []).forEach(s => {
+      if (s.weight_pct > 0) holdings.push({ ticker: s.ticker, weight_pct: s.weight_pct });
+    });
+    collect(portfolio.core_etfs);
+    collect(portfolio.leverage_etfs);
+    collect(portfolio.us_stocks);
+    collect(portfolio.kr_stocks);
+
+    if (holdings.length === 0) {
+      alert("백테스팅할 종목이 없음.");
+      return;
+    }
+
+    const container = document.getElementById("backtest-result");
+    container.innerHTML = `
+      <div class="loading">
+        <div class="spinner"></div>
+        <span>${years}년 데이터 다운로드 + 시뮬레이션 중...</span>
+      </div>`;
+    // 버튼 비활성화 (중복 호출 방지)
+    resultEl.querySelectorAll("[data-bt]").forEach(b => b.disabled = true);
+
+    try {
+      const res = await fetch("/api/backtest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ holdings, years }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        container.innerHTML = `<div class="error">백테스팅 실패: ${escape(data.error || "")}</div>`;
+        return;
+      }
+      container.innerHTML = renderBacktest(data);
+    } catch (err) {
+      container.innerHTML = `<div class="error">네트워크 오류: ${escape(err.message)}</div>`;
+    } finally {
+      resultEl.querySelectorAll("[data-bt]").forEach(b => b.disabled = false);
+    }
+  }
+
+  function renderBacktest(d) {
+    const s = d.stats;
+    const skippedNote = (d.skipped && d.skipped.length > 0)
+      ? `<div class="bt-note">⚠️ 5년 데이터 부족으로 제외된 종목: ${d.skipped.join(", ")}</div>`
+      : "";
+
+    const positiveCls = (v) => v >= 0 ? "good" : "bad";
+    const sign = (v) => v >= 0 ? "+" : "";
+
+    return `
+      <div class="bt-summary">
+        <h3 style="margin-top:14px;">📈 누적 수익률 (${d.n_years.toFixed(1)}년)</h3>
+        ${renderBacktestChart(d.equity_curve, d.benchmark_curve)}
+
+        <div class="bt-stats-grid">
+          <div class="bt-stat">
+            <div class="bt-stat-label">전체 수익률</div>
+            <div class="bt-stat-val ${positiveCls(s.total_return)}">${sign(s.total_return)}${(s.total_return*100).toFixed(1)}%</div>
+            <div class="bt-stat-sub">S&P 500: ${sign(s.benchmark_total)}${(s.benchmark_total*100).toFixed(1)}%</div>
+          </div>
+          <div class="bt-stat">
+            <div class="bt-stat-label">연환산 (CAGR)</div>
+            <div class="bt-stat-val ${positiveCls(s.cagr)}">${sign(s.cagr)}${(s.cagr*100).toFixed(2)}%</div>
+            <div class="bt-stat-sub">S&P 500: ${sign(s.benchmark_cagr)}${(s.benchmark_cagr*100).toFixed(2)}%</div>
+          </div>
+          <div class="bt-stat">
+            <div class="bt-stat-label">최대 낙폭</div>
+            <div class="bt-stat-val bad">${(s.max_drawdown*100).toFixed(1)}%</div>
+            <div class="bt-stat-sub">큰 위기 시 손실 규모</div>
+          </div>
+          <div class="bt-stat">
+            <div class="bt-stat-label">샤프 비율</div>
+            <div class="bt-stat-val ${s.sharpe >= 1 ? "good" : s.sharpe >= 0 ? "info" : "bad"}">${s.sharpe.toFixed(2)}</div>
+            <div class="bt-stat-sub">위험 대비 수익 (1+ 우수)</div>
+          </div>
+          <div class="bt-stat">
+            <div class="bt-stat-label">알파 (연환산)</div>
+            <div class="bt-stat-val ${positiveCls(s.alpha)}">${sign(s.alpha)}${(s.alpha*100).toFixed(2)}%</div>
+            <div class="bt-stat-sub">시장 초과 수익</div>
+          </div>
+          <div class="bt-stat">
+            <div class="bt-stat-label">베타</div>
+            <div class="bt-stat-val info">${s.beta.toFixed(2)}</div>
+            <div class="bt-stat-sub">시장 민감도 (1=시장과 같음)</div>
+          </div>
+        </div>
+        ${skippedNote}
+        <p class="bt-disclaimer">
+          ⚠️ <b>한계</b>: ① 추천된 종목이 5년 전부터 같은 비중으로 있었다고 가정 (survivorship bias 가능)
+          ② 리밸런싱/적립금 미반영 (buy-and-hold)
+          ③ 일부 종목 상장 5년 미만이면 제외
+        </p>
+      </div>
+    `;
+  }
+
+  function renderBacktestChart(equity, benchmark) {
+    if (!equity || equity.length === 0) return "";
+    const W = 600, H = 200, PAD = 40;
+    const allValues = [...equity.map(p => p[1]), ...(benchmark || []).map(p => p[1])];
+    const minV = Math.min(...allValues, 1) * 0.95;
+    const maxV = Math.max(...allValues, 1) * 1.05;
+
+    const n = equity.length;
+    const xStep = (W - PAD * 2) / Math.max(n - 1, 1);
+
+    const path = (points) => {
+      if (!points || points.length === 0) return "";
+      return points.map((p, i) => {
+        const x = PAD + i * ((W - PAD * 2) / Math.max(points.length - 1, 1));
+        const y = H - PAD - ((p[1] - minV) / (maxV - minV)) * (H - PAD * 2);
+        return (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1);
+      }).join(" ");
+    };
+
+    // X축 라벨 (시작/중간/끝)
+    const dateLbl = (idx) => equity[idx][0].slice(0, 7);  // YYYY-MM
+    const ticks = [0, Math.floor(n / 2), n - 1];
+
+    // Y축 % 변환 (1.0 = 0%)
+    const yLblPct = (v) => ((v - 1) * 100).toFixed(0) + "%";
+    const yTickV  = [minV, (minV + maxV) / 2, maxV];
+
+    return `
+      <svg viewBox="0 0 ${W} ${H}" class="bt-chart" xmlns="http://www.w3.org/2000/svg">
+        <!-- Y axis grid -->
+        ${yTickV.map(v => {
+          const y = H - PAD - ((v - minV) / (maxV - minV)) * (H - PAD * 2);
+          return `<line x1="${PAD}" y1="${y}" x2="${W-PAD}" y2="${y}" stroke="#2a2f37" stroke-dasharray="3,3"/>
+                  <text x="${PAD-6}" y="${y+3}" text-anchor="end" fill="var(--text-dim)" font-size="10">${yLblPct(v)}</text>`;
+        }).join("")}
+
+        <!-- 1.0 baseline -->
+        ${(() => {
+          const y = H - PAD - ((1 - minV) / (maxV - minV)) * (H - PAD * 2);
+          return `<line x1="${PAD}" y1="${y}" x2="${W-PAD}" y2="${y}" stroke="#495160" stroke-width="1"/>`;
+        })()}
+
+        <!-- Benchmark (SPY) -->
+        ${benchmark && benchmark.length > 0
+          ? `<path d="${path(benchmark)}" stroke="var(--text-dim)" stroke-width="1.5" fill="none" stroke-dasharray="4,3"/>`
+          : ""}
+
+        <!-- Portfolio -->
+        <path d="${path(equity)}" stroke="var(--accent)" stroke-width="2" fill="none"/>
+
+        <!-- X labels -->
+        ${ticks.map(i => `
+          <text x="${PAD + i * xStep}" y="${H-6}" text-anchor="middle" fill="var(--text-dim)" font-size="10">${dateLbl(i)}</text>
+        `).join("")}
+
+        <!-- Legend -->
+        <g transform="translate(${PAD+8}, 12)">
+          <line x1="0" y1="6" x2="20" y2="6" stroke="var(--accent)" stroke-width="2"/>
+          <text x="24" y="9" fill="var(--text)" font-size="11">포트폴리오</text>
+          <line x1="100" y1="6" x2="120" y2="6" stroke="var(--text-dim)" stroke-width="1.5" stroke-dasharray="4,3"/>
+          <text x="124" y="9" fill="var(--text-dim)" font-size="11">S&P 500</text>
+        </g>
+      </svg>
+    `;
   }
 
   function renderProfile(p) {

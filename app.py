@@ -486,6 +486,183 @@ def advise():
         sys.stdout = orig
 
 
+@app.route("/api/backtest", methods=["POST"])
+def backtest():
+    """
+    추천 포트폴리오 buy-and-hold 백테스팅 + S&P 500 벤치마크 비교.
+
+    입력 (JSON):
+      {
+        "holdings": [{"ticker": "AAPL", "weight_pct": 15.5}, ...],
+        "years":    5   (옵션, 기본 5)
+      }
+
+    출력:
+      {
+        "ok": true,
+        "equity_curve":     [[YYYY-MM-DD, value], ...],
+        "benchmark_curve":  [[YYYY-MM-DD, value], ...],
+        "stats": {
+          "cagr": 0.12, "volatility": 0.18, "sharpe": 0.65,
+          "max_drawdown": -0.25, "total_return": 0.85,
+          "alpha": 0.02, "beta": 1.05, "benchmark_cagr": 0.10,
+        },
+        "skipped":  ["TICKER1", "TICKER2"],   // 5년 데이터 없는 종목
+        "n_years":  5,
+      }
+    """
+    import yfinance as yf
+    import pandas as pd
+    import numpy as np
+
+    data = request.get_json(force=True, silent=True) or {}
+    holdings = data.get("holdings", [])
+    years = int(data.get("years", 5))
+    years = max(1, min(years, 10))
+
+    if not holdings:
+        return jsonify({"ok": False, "error": "holdings 비어있음"}), 400
+
+    # 비중 정규화 (현금/원하는 외 종목만으로 100% 만들기)
+    total_w = sum(float(h.get("weight_pct", 0)) for h in holdings)
+    if total_w <= 0:
+        return jsonify({"ok": False, "error": "비중 합이 0"}), 400
+
+    end   = pd.Timestamp.today().normalize()
+    start = end - pd.DateOffset(years=years)
+    tickers = [h["ticker"] for h in holdings]
+
+    # 한국 종목은 yfinance에서 받아오기 (Render에선 차단 가능)
+    try:
+        df = yf.download(tickers, start=start, end=end,
+                         progress=False, auto_adjust=True, group_by="ticker")
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"yfinance 다운로드 실패: {e}"}), 500
+
+    if df.empty:
+        return jsonify({"ok": False, "error": "가격 데이터 없음 (Render에서 yfinance 차단 가능)"}), 500
+
+    # 종목별 종가 시계열 추출
+    closes = {}
+    skipped = []
+    for h in holdings:
+        t = h["ticker"]
+        try:
+            if len(tickers) == 1:
+                series = df["Close"] if "Close" in df.columns else df
+            else:
+                series = df[t]["Close"] if t in df.columns.get_level_values(0) else None
+            if series is None or series.dropna().empty:
+                skipped.append(t); continue
+            # 5년 전체 데이터가 있어야 의미 있음 (50% 이상 있으면 통과)
+            valid = series.dropna()
+            expected_days = years * 250 * 0.5
+            if len(valid) < expected_days:
+                skipped.append(t); continue
+            closes[t] = valid
+        except Exception:
+            skipped.append(t)
+
+    if not closes:
+        return jsonify({"ok": False, "error": "유효한 종목 없음", "skipped": skipped}), 500
+
+    # 비중 재정규화 (skipped 제외)
+    valid_weights = {t: float(h["weight_pct"]) for t, h in zip(tickers, holdings) if t in closes}
+    sum_w = sum(valid_weights.values())
+    if sum_w <= 0:
+        return jsonify({"ok": False, "error": "유효 비중 0"}), 500
+    norm_weights = {t: w / sum_w for t, w in valid_weights.items()}
+
+    # 공통 날짜 인덱스 정렬 + forward fill
+    price_df = pd.DataFrame({t: s for t, s in closes.items()}).ffill().dropna()
+    if price_df.empty or len(price_df) < 30:
+        return jsonify({"ok": False, "error": "공통 가격 데이터 부족"}), 500
+
+    # 일별 수익률
+    rets = price_df.pct_change().fillna(0)
+    # 포트폴리오 일별 수익률 = 종목별 수익률 × 비중
+    port_rets = sum(rets[t] * norm_weights[t] for t in price_df.columns)
+    # 누적 수익률 (기준값 1.0)
+    equity_curve = (1 + port_rets).cumprod()
+
+    # 벤치마크 (S&P 500 = SPY)
+    try:
+        spy = yf.download("SPY", start=start, end=end, progress=False, auto_adjust=True)
+        spy_close = spy["Close"].squeeze() if not spy.empty else None
+        if spy_close is None or spy_close.dropna().empty:
+            bench_curve = pd.Series(dtype=float)
+        else:
+            spy_close = spy_close.reindex(equity_curve.index).ffill().dropna()
+            bench_rets = spy_close.pct_change().fillna(0)
+            bench_curve = (1 + bench_rets).cumprod()
+            # 공통 인덱스로 다시 정렬
+            common = equity_curve.index.intersection(bench_curve.index)
+            equity_curve = equity_curve.reindex(common)
+            bench_curve  = bench_curve.reindex(common)
+    except Exception as e:
+        logging.warning(f"SPY 벤치마크 다운로드 실패: {e}")
+        bench_curve = pd.Series(dtype=float)
+
+    # ── 통계 ─────────────────────────────────────────
+    total_days = len(equity_curve)
+    n_years = total_days / 252.0 if total_days > 0 else 1.0
+    total_ret = float(equity_curve.iloc[-1] / equity_curve.iloc[0] - 1)
+    cagr = (1 + total_ret) ** (1.0 / n_years) - 1 if n_years > 0 else 0.0
+
+    daily_ret = equity_curve.pct_change().dropna()
+    vol_annual = float(daily_ret.std() * np.sqrt(252)) if len(daily_ret) > 1 else 0.0
+    rf = 0.045
+    sharpe = (cagr - rf) / vol_annual if vol_annual > 0 else 0.0
+
+    # 최대 낙폭 (MDD)
+    peak = equity_curve.cummax()
+    drawdown = equity_curve / peak - 1
+    mdd = float(drawdown.min()) if len(drawdown) > 0 else 0.0
+
+    # 알파/베타 (벤치마크 있을 때만)
+    alpha, beta, bench_cagr, bench_total = 0.0, 1.0, 0.0, 0.0
+    if not bench_curve.empty and len(bench_curve) > 30:
+        bench_daily = bench_curve.pct_change().dropna()
+        # 공통 인덱스
+        idx = daily_ret.index.intersection(bench_daily.index)
+        if len(idx) > 30:
+            x = bench_daily.reindex(idx).values
+            y = daily_ret.reindex(idx).values
+            cov = float(np.cov(y, x)[0, 1])
+            var = float(np.var(x))
+            beta = cov / var if var > 0 else 1.0
+            # 알파 = 포트폴리오 CAGR − (rf + beta × (benchmark_cagr − rf))
+            bench_total = float(bench_curve.iloc[-1] / bench_curve.iloc[0] - 1)
+            bench_cagr = (1 + bench_total) ** (1.0 / n_years) - 1
+            alpha = cagr - (rf + beta * (bench_cagr - rf))
+
+    # 시계열 다운샘플링 (월별, 차트 데이터량 감소)
+    def downsample(series):
+        if series.empty: return []
+        monthly = series.resample("ME").last().dropna()
+        return [[d.strftime("%Y-%m-%d"), round(float(v), 4)] for d, v in monthly.items()]
+
+    return jsonify({
+        "ok": True,
+        "equity_curve":    downsample(equity_curve),
+        "benchmark_curve": downsample(bench_curve) if not bench_curve.empty else [],
+        "stats": {
+            "cagr":          round(cagr, 4),
+            "volatility":    round(vol_annual, 4),
+            "sharpe":        round(sharpe, 3),
+            "max_drawdown":  round(mdd, 4),
+            "total_return":  round(total_ret, 4),
+            "alpha":         round(alpha, 4),
+            "beta":          round(beta, 3),
+            "benchmark_cagr":  round(bench_cagr, 4),
+            "benchmark_total": round(bench_total, 4),
+        },
+        "skipped": skipped,
+        "n_years": round(n_years, 2),
+        "n_tickers": len(closes),
+    })
+
+
 if __name__ == "__main__":
     # 로컬 실행 시 기본값. 배포(Render 등)에서는 gunicorn이 Procfile로 띄움.
     port = int(os.environ.get("PORT", 5000))

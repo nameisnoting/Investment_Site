@@ -388,6 +388,69 @@ html, body {
 .btn-primary:active:not(:disabled) { transform: scale(0.98); }
 .btn-primary:disabled { background: #4a4255; color: #8c8295; cursor: not-allowed; }
 
+.btn-secondary {
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-secondary:hover:not(:disabled) {
+  background: var(--panel);
+  border-color: var(--accent);
+}
+.btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── 백테스팅 결과 ───────────────────────────────────── */
+.bt-chart {
+  width: 100%;
+  height: auto;
+  margin: 10px 0;
+  background: rgba(255,255,255,0.02);
+  border-radius: 6px;
+}
+.bt-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-top: 10px;
+}
+.bt-stat {
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.02);
+  border-left: 3px solid var(--border);
+  border-radius: 4px;
+}
+.bt-stat-label { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.bt-stat-val {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.bt-stat-val.good { color: var(--good); }
+.bt-stat-val.bad  { color: var(--bad); }
+.bt-stat-val.info { color: var(--info); }
+.bt-stat-sub { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+.bt-note {
+  font-size: 11px;
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.08);
+  border-left: 3px solid var(--warn);
+  padding: 6px 10px;
+  border-radius: 4px;
+  margin-top: 10px;
+}
+.bt-disclaimer {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 10px;
+  line-height: 1.5;
+}
+
 .divider {
   border: none;
   border-top: 1px solid var(--border);
