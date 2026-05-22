@@ -530,6 +530,210 @@ class Screener:
             logger.warning(f"ETF {ticker} 평가 실패: {e}")
             return None
 
+    # ==============================================================
+    # 폭등시그널 평가 (Phase B)
+    # ==============================================================
+
+    def _bollinger_squeeze_signal(self, ticker: str) -> dict:
+        """
+        볼린저 스퀴즈 + 거래량 폭발 + 상단 돌파 감지.
+          - squeeze: 20일 표준편차가 60일 평균 표준편차의 70% 이하
+          - volume_spike: 오늘 거래량이 20일 평균의 3배 이상
+          - breakout: 현재가가 볼린저 상단(MA20+2σ) 위
+        총 25점 (squeeze 8 + volume_spike 10 + breakout 7)
+        """
+        try:
+            df = self.fetcher.history(ticker, period="6mo")
+            if df.empty or len(df) < 60:
+                return {"squeeze": False, "volume_spike": False, "breakout": False,
+                        "score": 0, "vol_ratio": 0.0, "std_ratio": 0.0}
+            close = df["Close"].squeeze()
+            volume = df["Volume"].squeeze() if "Volume" in df.columns else None
+
+            ma20 = close.rolling(20).mean()
+            std20 = close.rolling(20).std()
+            upper = ma20 + 2 * std20
+
+            std60_mean = std20.rolling(60).mean()
+            cur_std = float(std20.iloc[-1])
+            avg_std = float(std60_mean.iloc[-1])
+            squeeze = (cur_std / avg_std) < 0.70 if avg_std and avg_std > 0 else False
+            std_ratio = (cur_std / avg_std) if avg_std and avg_std > 0 else 0.0
+
+            volume_spike, vol_ratio = False, 0.0
+            if volume is not None and len(volume) >= 20:
+                avg_vol = float(volume.iloc[-20:].mean())
+                cur_vol = float(volume.iloc[-1])
+                if avg_vol > 0:
+                    vol_ratio = cur_vol / avg_vol
+                    volume_spike = vol_ratio >= 3.0
+
+            cur = float(close.iloc[-1])
+            breakout = cur > float(upper.iloc[-1])
+
+            score = 0
+            if squeeze:      score += 8
+            if volume_spike: score += 10
+            if breakout:     score += 7
+
+            return {"squeeze": squeeze, "volume_spike": volume_spike, "breakout": breakout,
+                    "score": score, "vol_ratio": vol_ratio, "std_ratio": std_ratio}
+        except Exception as e:
+            logger.warning(f"{ticker} 볼린저 분석 실패: {e}")
+            return {"squeeze": False, "volume_spike": False, "breakout": False,
+                    "score": 0, "vol_ratio": 0.0, "std_ratio": 0.0}
+
+    def score_surge(self, ticker: str, country: str = "US") -> Optional[StockScore]:
+        """
+        폭등시그널 평가 (Phase B).
+        점수 구성 (총 100점):
+          - 매출 성장률 40점 (핵심)
+          - FCF 전환    15점
+          - 볼린저 스퀴즈+거래량 25점
+          - 단기 모멘텀  15점
+          - RSI 회복     5점
+
+        게이트 (장기 모드보다 완화):
+          - ROE 게이트 제거 (그로스주는 적자 흔함)
+          - 부채비율 300% 초과만 탈락
+          - 매출 성장 5% 미만 탈락
+        """
+        try:
+            info   = self.fetcher.info(ticker)
+            name   = info.get("longName") or info.get("shortName", ticker)
+            sector = info.get("sector", "Unknown")
+
+            debt_eq    = info.get("debtToEquity")
+            rev_growth = info.get("revenueGrowth")
+            fcf_raw    = info.get("freeCashflow")
+            revenue    = info.get("totalRevenue")
+            roe_raw    = info.get("returnOnEquity")
+
+            # ── 완화 게이트 ──
+            if debt_eq is not None and float(debt_eq) > 300:
+                logger.info(f"{ticker}: 부채비율 과다 ({debt_eq:.0f}) → surge 스킵")
+                return None
+            if rev_growth is None or float(rev_growth) < 0.05:
+                logger.info(f"{ticker}: 매출 성장 부족 (rev={rev_growth}) → surge 스킵")
+                return None
+
+            rev = float(rev_growth)
+
+            # 1) 매출 성장 (40점)
+            if   rev >= 0.50: rev_score = 40
+            elif rev >= 0.30: rev_score = 30
+            elif rev >= 0.20: rev_score = 22
+            elif rev >= 0.10: rev_score = 12
+            else:             rev_score = 5
+
+            # 2) FCF 전환 (15점)
+            fcf_score = 0
+            fcf_margin = None
+            if fcf_raw is not None and revenue and float(revenue) > 0:
+                fcf_margin = float(fcf_raw) / float(revenue)
+                if   fcf_margin > 0.10:  fcf_score = 15
+                elif fcf_margin > 0.00:  fcf_score = 10   # 전환 성공
+                elif fcf_margin > -0.05: fcf_score = 5    # break-even 근처
+                else:                    fcf_score = 0
+
+            # 3) 볼린저 스퀴즈 + 거래량 (25점)
+            boll = self._bollinger_squeeze_signal(ticker)
+            boll_score = boll["score"]
+
+            # 4) 단기 모멘텀 (15점)
+            tech = self._technical(ticker)
+            mom = tech["momentum"]
+            if   mom > 0.20: mom_score = 15
+            elif mom > 0.10: mom_score = 10
+            elif mom > 0.05: mom_score = 5
+            else:            mom_score = 0
+
+            # 5) RSI 회복 (5점)
+            rsi = tech["rsi"]
+            rsi_score = 5 if 45 <= rsi <= 75 else 0
+
+            total = rev_score + fcf_score + boll_score + mom_score + rsi_score
+            entry_plan = self._make_surge_entry_plan(
+                cur=tech.get("last_price", 0.0), rsi=rsi, mom=mom, boll=boll,
+            )
+
+            return StockScore(
+                ticker=ticker, name=name, country=country, sector=sector,
+                roe=round(float(roe_raw) * 100, 2) if roe_raw is not None else None,
+                pbr=None, per=None,
+                debt_to_equity=round(float(debt_eq), 1) if debt_eq is not None else None,
+                fundamental_score=round(rev_score + fcf_score, 1),
+                rsi=round(rsi, 1),
+                trend_score=round(tech["trend"], 3),
+                momentum_pct=round(mom * 100, 2),
+                technical_score=round(boll_score + mom_score + rsi_score, 1),
+                composite_score=round(total, 1),
+                entry_signal=boll["squeeze"] or boll["volume_spike"],
+                entry_plan=entry_plan,
+                pbr_source="missing",
+                per_source="missing",
+                fcf_margin=round(fcf_margin * 100, 2) if fcf_margin is not None else None,
+                operating_margin=None,
+                peg=None,
+            )
+        except Exception as e:
+            logger.warning(f"{ticker} surge 평가 실패: {e}")
+            return None
+
+    def _make_surge_entry_plan(self, cur: float, rsi: float, mom: float, boll: dict) -> EntryPlan:
+        """폭등시그널 종목용 진입 플랜"""
+        # 볼린저 돌파 + 거래량 폭발 → 즉시 추세 추종
+        if boll["breakout"] and boll["volume_spike"]:
+            return EntryPlan(
+                action="MOMENTUM_RIDE", label="추세 추종 매수",
+                rationale=(f"볼린저 상단 돌파 + 거래량 {boll['vol_ratio']:.1f}배 — 추세 시작"),
+                current_price=round(cur, 2),
+                target_levels=[(round(cur, 2), 100.0)],
+                confidence=0.80,
+            )
+        # 스퀴즈 상태 → 폭발 임박, 50% 즉시 + 분할
+        if boll["squeeze"]:
+            return EntryPlan(
+                action="SPLIT_BUY", label="스퀴즈 분할",
+                rationale=(f"변동성 수축 (std {boll['std_ratio']*100:.0f}%) — 폭발 임박"),
+                current_price=round(cur, 2),
+                target_levels=[
+                    (round(cur, 2),        50.0),
+                    (round(cur * 0.97, 2), 25.0),
+                    (round(cur * 0.94, 2), 25.0),
+                ],
+                confidence=0.65,
+            )
+        # 모멘텀 + RSI 정상 → 추세 추종
+        if 50 <= rsi <= 75 and mom > 0.10:
+            return EntryPlan(
+                action="MOMENTUM_RIDE", label="추세 추종 매수",
+                rationale=f"모멘텀 {mom*100:+.1f}% + RSI {rsi:.1f}",
+                current_price=round(cur, 2),
+                target_levels=[(round(cur, 2), 100.0)],
+                confidence=0.70,
+            )
+        # RSI 과매수 → 보류
+        if rsi >= 80:
+            return EntryPlan(
+                action="AVOID", label="진입 보류",
+                rationale=f"극단 과매수 (RSI {rsi:.1f}) — 폭등시그널이라도 위험",
+                current_price=round(cur, 2),
+                target_levels=[], confidence=0.20,
+            )
+        # 그 외 → 보수적 3분할
+        return EntryPlan(
+            action="SPLIT_BUY", label="분할 매수",
+            rationale=f"신호 약함 (모멘텀 {mom*100:+.1f}%, RSI {rsi:.1f})",
+            current_price=round(cur, 2),
+            target_levels=[
+                (round(cur,        2), 33.3),
+                (round(cur * 0.97, 2), 33.3),
+                (round(cur * 0.94, 2), 33.4),
+            ],
+            confidence=0.50,
+        )
+
     def score(self, ticker: str, country: str = "US") -> Optional[StockScore]:
         try:
             info   = self.fetcher.info(ticker)
@@ -911,19 +1115,83 @@ class PortfolioConstructor:
             "kr_stocks":    kr_final,
         }
 
-    def _allocate_core(self, etfs: List[StockScore], budget: float) -> List[StockScore]:
+    def _allocate_core(self, etfs: List[StockScore], budget: float,
+                       pool_override: Optional[List[dict]] = None) -> List[StockScore]:
         """
         코어 ETF는 config의 weight 그대로 사용 (점수 무관, 시장지수 추종이라 분산 자체가 핵심).
         weight 합이 1이 안 되면 정규화.
+        pool_override 주면 surge_core_etf_pool 등 다른 풀의 weight 사용.
         """
         if not etfs or budget <= 0:
             return []
-        weight_map = {e["ticker"]: e["weight"] for e in self.cfg.core_etf_pool}
+        pool = pool_override if pool_override is not None else self.cfg.core_etf_pool
+        weight_map = {e["ticker"]: e["weight"] for e in pool}
         total_w = sum(weight_map.get(s.ticker, 0) for s in etfs) or 1.0
         for s in etfs:
             w = weight_map.get(s.ticker, 0) / total_w
             s.weight_pct = round(w * budget, 2)
         return etfs
+
+    # ── 폭등시그널 모드 포트폴리오 구성 ───────────────────────
+    LEVERAGE_RATIO_TABLE = {1: 0.0, 2: 0.05, 3: 0.15, 4: 0.25, 5: 0.30}
+
+    def construct_surge(
+        self,
+        surge_candidates: List[StockScore],
+        core_etfs: List[StockScore],            # surge_core_etf_pool (VOO, QQQ)
+        leverage_etfs: List[StockScore],        # leverage_etf_pool (TQQQ, SOXL, UPRO)
+        us_regime: MarketRegime,
+        risk_level: int,
+    ) -> dict:
+        """폭등시그널 모드: 코어(VOO/QQQ) + 레버리지 ETF + surge_pool 위성"""
+        equity_ratio = self._equity_ratio_from_composite(
+            us_regime.composite_score, us_regime.vix
+        )
+        cash_pct     = round((1 - equity_ratio) * 100, 1)
+        invest_total = 100.0 * equity_ratio
+
+        # ── 슬라이더 → 레버리지 ETF 비중 ──
+        leverage_ratio = self.LEVERAGE_RATIO_TABLE.get(risk_level, 0.15)
+        # 시장 약세 시 레버리지 비중 자동 축소 (composite 0.5 미만이면 50% 축소)
+        if us_regime.composite_score < 0.5:
+            leverage_ratio *= 0.5
+
+        core_ratio = max(0.10, min(self.cfg.core_ratio, 0.90))
+
+        leverage_budget  = invest_total * leverage_ratio
+        remaining        = invest_total * (1 - leverage_ratio)
+        core_budget      = remaining * core_ratio
+        satellite_budget = remaining * (1 - core_ratio)
+
+        core_final     = self._allocate_core(core_etfs, core_budget,
+                                              pool_override=self.cfg.surge_core_etf_pool)
+        leverage_final = self._allocate_core(leverage_etfs, leverage_budget,
+                                              pool_override=self.cfg.leverage_etf_pool)
+
+        # 위성 (surge_pool): 점수 비례 배분, 섹터 필터 안 함 (이미 다 그로스 섹터)
+        ranked   = sorted(surge_candidates, key=lambda x: x.composite_score, reverse=True)
+        selected = ranked[:self.cfg.top_n]
+        total_score = sum(s.composite_score for s in selected) or 1.0
+        for s in selected:
+            raw = (s.composite_score / total_score) * satellite_budget
+            s.weight_pct = round(min(raw, satellite_budget * self.cfg.single_stock_cap), 2)
+        # 잔여 재배분
+        allocated = sum(s.weight_pct for s in selected)
+        if allocated < satellite_budget and selected:
+            selected[-1].weight_pct = round(selected[-1].weight_pct + (satellite_budget - allocated), 2)
+
+        return {
+            "equity_ratio":  equity_ratio,
+            "cash_pct":      cash_pct,
+            "core_budget":   round(sum(e.weight_pct for e in core_final), 1),
+            "leverage_budget": round(sum(e.weight_pct for e in leverage_final), 1),
+            "us_budget":     round(sum(s.weight_pct for s in selected), 1),
+            "kr_budget":     0.0,
+            "core_etfs":     core_final,
+            "leverage_etfs": leverage_final,
+            "us_stocks":     selected,
+            "kr_stocks":     [],
+        }
 
     # ── 내부 헬퍼 ──────────────────────────────────────────────
 
@@ -1095,6 +1363,8 @@ class InvestmentAdvisor:
         krw = self.profile.investable_capital
         usd = self.profile.investable_usd
         for s in result.get("core_etfs", []):
+            s.invest_amount = round(usd * s.weight_pct / 100, 0)
+        for s in result.get("leverage_etfs", []):
             s.invest_amount = round(usd * s.weight_pct / 100, 0)
         for s in result.get("us_stocks", []):
             s.invest_amount = round(usd * s.weight_pct / 100, 0)

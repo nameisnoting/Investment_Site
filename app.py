@@ -261,6 +261,54 @@ def advise():
             )
             return jsonify(result_payload)
 
+        # ──────────────────────────────────────────────────────
+        # 전략 분기: long_term (기존) / surge (Phase B) / 추후 momentum / mixed
+        # ──────────────────────────────────────────────────────
+        if strategy == "surge":
+            # ── 폭등시그널 모드 ─────────────────────────────
+            surge_scored = [s for t in advisor.cfg.surge_pool
+                            if (s := advisor.screener.score_surge(t, "US"))]
+            core_scored  = [s for e in advisor.cfg.surge_core_etf_pool
+                            if (s := advisor.screener.score_etf(e["ticker"], e["name"]))]
+            leverage_scored = [s for e in advisor.cfg.leverage_etf_pool
+                               if (s := advisor.screener.score_etf(e["ticker"], e["name"]))]
+
+            if not surge_scored and not core_scored:
+                result_payload["message"] = "폭등시그널 통과 종목이 없음."
+                return jsonify(result_payload)
+
+            portfolio = advisor.portcons.construct_surge(
+                surge_scored, core_scored, leverage_scored, us_regime, risk_level
+            )
+            advisor._fill_invest_amounts(portfolio)
+
+            result_payload["portfolio"] = {
+                "equity_ratio":    portfolio["equity_ratio"],
+                "cash_pct":        portfolio["cash_pct"],
+                "core_budget":     portfolio["core_budget"],
+                "leverage_budget": portfolio["leverage_budget"],
+                "us_budget":       portfolio["us_budget"],
+                "kr_budget":       portfolio["kr_budget"],
+                "core_etfs":       [_serialize_stock(s) for s in portfolio["core_etfs"]],
+                "leverage_etfs":   [_serialize_stock(s) for s in portfolio["leverage_etfs"]],
+                "us_stocks":       [_serialize_stock(s) for s in portfolio["us_stocks"]],
+                "kr_stocks":       [],
+                "core_ratio":      advisor.cfg.core_ratio,
+                "dca_months":      advisor.cfg.dca_months,
+                "screened": {
+                    "us_total":      len(advisor.cfg.surge_pool),
+                    "us_passed":     len(surge_scored),
+                    "kr_total":      0,
+                    "kr_passed":     0,
+                    "core_total":    len(advisor.cfg.surge_core_etf_pool),
+                    "core_passed":   len(core_scored),
+                    "leverage_total":  len(advisor.cfg.leverage_etf_pool),
+                    "leverage_passed": len(leverage_scored),
+                },
+            }
+            return jsonify(result_payload)
+
+        # ── 기본: long_term 모드 (mixed / momentum도 일단 여기로 → Phase C/D) ──
         us_scored = [s for t in advisor.cfg.us_pool
                      if (s := advisor.screener.score(t, "US"))]
         kr_scored = [s for t in advisor.cfg.kr_pool

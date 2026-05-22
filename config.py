@@ -117,6 +117,32 @@ class AdvisorConfig:
         {"ticker": "EWY",  "name": "iShares MSCI Korea ETF",       "weight": 0.10},
     ])
 
+    # ── 폭등시그널 모드 전용 풀 ─────────────────────────────────
+    # 코어: 안전자산(BND/SCHD) 제거, 성장 중심 (VOO + QQQ)
+    surge_core_etf_pool: List[Dict] = field(default_factory=lambda: [
+        {"ticker": "VOO", "name": "Vanguard S&P 500 ETF", "weight": 0.55},
+        {"ticker": "QQQ", "name": "Invesco QQQ Trust",     "weight": 0.45},
+    ])
+
+    # 레버리지 ETF (3x): risk_level에 따라 비중 적용
+    leverage_etf_pool: List[Dict] = field(default_factory=lambda: [
+        {"ticker": "TQQQ", "name": "ProShares UltraPro QQQ (3x Nasdaq)", "weight": 0.40},
+        {"ticker": "SOXL", "name": "Direxion Semiconductor Bull 3x",     "weight": 0.30},
+        {"ticker": "UPRO", "name": "ProShares UltraPro S&P 500 (3x)",    "weight": 0.30},
+    ])
+
+    # 폭등시그널 종목 풀 (24개, Finnhub 무료에서 데이터 OK 검증 완료)
+    surge_pool: List[str] = field(default_factory=lambda: [
+        # SaaS / 클라우드 보안 (9)
+        "NET", "DDOG", "SNOW", "MDB", "CRWD", "ZS", "OKTA", "S", "PATH",
+        # 핀테크 / 디지털 금융 (5)
+        "SOFI", "AFRM", "COIN", "HOOD", "UPST",
+        # AI / 메타버스 / 차세대 컴퓨팅 (6)
+        "PLTR", "AI", "IONQ", "RBLX", "U", "BBAI",
+        # 신흥 그로스 (4)
+        "DUOL", "APP", "CELH", "MNDY",
+    ])
+
     # 코어 ETF는 시장 추종 — RSI 기반 진입 보류 부적절.
     # 목표 금액을 이 기간에 걸쳐 매월 균등 적립 (DCA).
     dca_months: int = 12
@@ -211,4 +237,33 @@ class AdvisorConfig:
         "006400.KS": {"name": "Samsung SDI",          "sector": "Technology"},
         "035720.KS": {"name": "Kakao Corp.",          "sector": "Communication Services"},
         "000270.KS": {"name": "Kia Corp.",            "sector": "Consumer Cyclical"},
+        # ── 폭등시그널 풀 (소형~중형 그로스) ─────────────────
+        "NET":   {"name": "Cloudflare",                "sector": "Technology"},
+        "DDOG":  {"name": "Datadog",                   "sector": "Technology"},
+        "SNOW":  {"name": "Snowflake",                 "sector": "Technology"},
+        "MDB":   {"name": "MongoDB",                   "sector": "Technology"},
+        "CRWD":  {"name": "CrowdStrike",               "sector": "Technology"},
+        "ZS":    {"name": "Zscaler",                   "sector": "Technology"},
+        "OKTA":  {"name": "Okta Inc.",                 "sector": "Technology"},
+        "S":     {"name": "SentinelOne",               "sector": "Technology"},
+        "PATH":  {"name": "UiPath",                    "sector": "Technology"},
+        "SOFI":  {"name": "SoFi Technologies",         "sector": "Financial Services"},
+        "AFRM":  {"name": "Affirm Holdings",           "sector": "Financial Services"},
+        "COIN":  {"name": "Coinbase",                  "sector": "Financial Services"},
+        "HOOD":  {"name": "Robinhood Markets",         "sector": "Financial Services"},
+        "UPST":  {"name": "Upstart Holdings",          "sector": "Financial Services"},
+        "PLTR":  {"name": "Palantir Technologies",     "sector": "Technology"},
+        "AI":    {"name": "C3.ai",                     "sector": "Technology"},
+        "IONQ":  {"name": "IonQ",                      "sector": "Technology"},
+        "RBLX":  {"name": "Roblox",                    "sector": "Communication Services"},
+        "U":     {"name": "Unity Software",            "sector": "Technology"},
+        "BBAI":  {"name": "BigBear.ai",                "sector": "Technology"},
+        "DUOL":  {"name": "Duolingo",                  "sector": "Consumer Cyclical"},
+        "APP":   {"name": "AppLovin",                  "sector": "Technology"},
+        "CELH":  {"name": "Celsius Holdings",          "sector": "Consumer Defensive"},
+        "MNDY":  {"name": "monday.com",                "sector": "Technology"},
+        # 레버리지 ETF (3x)
+        "TQQQ":  {"name": "ProShares UltraPro QQQ",        "sector": "Leverage ETF"},
+        "SOXL":  {"name": "Direxion Semiconductor Bull 3x", "sector": "Leverage ETF"},
+        "UPRO":  {"name": "ProShares UltraPro S&P 500",     "sector": "Leverage ETF"},
     })

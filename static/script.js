@@ -435,6 +435,7 @@
     IMMEDIATE: "🟢", SPLIT_BUY: "🟡", WAIT_PULLBACK: "🟠", AVOID: "🔴",
     DCA: "💰",
     AGGRESSIVE_BUY: "🔥",
+    MOMENTUM_RIDE: "🚀",
   };
 
   function won(n) {
@@ -578,35 +579,96 @@
   }
 
   function renderPortfolio(p, prof) {
-    const corePct = p.core_budget || 0;
-    const usPct = p.us_budget;
-    const krPct = p.kr_budget;
-    const cashPct = p.cash_pct;
+    const corePct  = p.core_budget || 0;
+    const leverPct = p.leverage_budget || 0;
+    const usPct    = p.us_budget;
+    const krPct    = p.kr_budget;
+    const cashPct  = p.cash_pct;
+    const strategy = prof.strategy || "long_term";
+    const isSurge  = strategy === "surge";
+
+    const coreLabel = isSurge ? "🛡️ 코어 ETF (성장 지수)" : "🛡️ 코어 ETF (안전자산)";
+    const usLabel   = isSurge ? "🚀 폭등 후보 (위성)"     : "🇺🇸 미국 개별주 (위성)";
+
+    const leverRow = leverPct > 0 ? `
+      <div class="k">⚡ 레버리지 3x ETF</div><div class="v">${pct(leverPct)}</div>` : "";
+    const leverBar = leverPct > 0 ? `
+      <div class="b-lever" style="width:${leverPct}%" title="레버리지 ${leverPct}%"></div>` : "";
+
+    const screenedText = isSurge
+      ? `스크리닝: 코어 ${p.screened.core_passed}/${p.screened.core_total},
+         레버리지 ${p.screened.leverage_passed || 0}/${p.screened.leverage_total || 0},
+         폭등풀 ${p.screened.us_passed}/${p.screened.us_total}`
+      : `스크리닝: ETF ${p.screened.core_passed}/${p.screened.core_total},
+         미국 ${p.screened.us_passed}/${p.screened.us_total},
+         한국 ${p.screened.kr_passed}/${p.screened.kr_total}`;
 
     return `
       <div class="result-block">
-        <h2>💰 자산 배분</h2>
+        <h2>💰 자산 배분 ${isSurge ? '<span class="badge bad">폭등시그널 모드</span>' : ''}</h2>
         <div class="bar">
           <div class="b-core" style="width:${corePct}%" title="코어 ETF ${corePct}%"></div>
+          ${leverBar}
           <div class="b-us"   style="width:${usPct}%"   title="미국 위성 ${usPct}%"></div>
           <div class="b-kr"   style="width:${krPct}%"   title="한국 ${krPct}%"></div>
           <div class="b-cash" style="width:${cashPct}%" title="현금 ${cashPct}%"></div>
         </div>
         <div class="kv" style="margin-top:8px;">
-          <div class="k">🛡️ 코어 ETF (안전자산)</div><div class="v">${pct(corePct)}</div>
-          <div class="k">🇺🇸 미국 개별주 (위성)</div><div class="v">${pct(usPct)}</div>
-          <div class="k">🇰🇷 한국 개별주 (위성)</div><div class="v">${pct(krPct)}</div>
+          <div class="k">${coreLabel}</div><div class="v">${pct(corePct)}</div>
+          ${leverRow}
+          <div class="k">${usLabel}</div><div class="v">${pct(usPct)}</div>
+          ${krPct > 0 ? `<div class="k">🇰🇷 한국 개별주 (위성)</div><div class="v">${pct(krPct)}</div>` : ""}
           <div class="k">💵 현금 보유</div><div class="v">${pct(cashPct)}</div>
         </div>
         <div style="font-size:11px;color:var(--text-dim);margin-top:6px;">
-          스크리닝: ETF ${p.screened.core_passed}/${p.screened.core_total},
-          미국 ${p.screened.us_passed}/${p.screened.us_total},
-          한국 ${p.screened.kr_passed}/${p.screened.kr_total}
+          ${screenedText}
         </div>
 
         ${renderCoreETFs(p.core_etfs, p.dca_months || 12)}
-        ${renderStocks("🇺🇸 미국 추천 (위성)", p.us_stocks)}
+        ${renderLeverageETFs(p.leverage_etfs)}
+        ${renderStocks(isSurge ? "🚀 폭등 후보 (위성)" : "🇺🇸 미국 추천 (위성)", p.us_stocks)}
         ${renderStocks("🇰🇷 한국 추천 (위성)", p.kr_stocks)}
+      </div>
+    `;
+  }
+
+  function renderLeverageETFs(etfs) {
+    if (!etfs || etfs.length === 0) return "";
+    return `
+      <h3>⚡ 레버리지 ETF (3배 — 고위험 고수익)</h3>
+      <div class="leverage-warn">
+        ⚠️ 일일 변동성이 3배. 장기 보유 시 변동성 손실(decay) 누적. 단기 진입 권장.
+      </div>
+      ${etfs.map(renderLeverageCard).join("")}
+    `;
+  }
+
+  function renderLeverageCard(s) {
+    const plan = s.entry_plan;
+    const tag = plan ? (ACTION_TAG[plan.action] || "⚪") : "⚪";
+    const planLabel = plan ? plan.label : "—";
+    const amountStr = s.invest_amount > 0 ? usd(s.invest_amount) : "";
+
+    return `
+      <div class="stock-card leverage-card">
+        <div class="stock-head">
+          <div>
+            ${tag}
+            <span class="tag-${plan ? plan.action : "AVOID"}">[${escape(planLabel)}]</span>
+            ${escape(s.name)}
+            <span class="ticker">(${escape(s.ticker)})</span>
+          </div>
+          <div style="font-variant-numeric:tabular-nums;color:var(--bad);">
+            ${pct(s.weight_pct)}
+          </div>
+        </div>
+        <div class="stock-meta">
+          3x 레버리지 ETF
+          ${amountStr ? `· 목표 ${amountStr}` : ""}
+          · RSI ${s.rsi.toFixed(1)}
+          · 모멘텀 ${(s.momentum_pct >= 0 ? "+" : "") + s.momentum_pct.toFixed(1)}%
+        </div>
+        ${plan ? renderPlan(plan, "US") : ""}
       </div>
     `;
   }
@@ -718,6 +780,13 @@
   function renderPlan(plan, country) {
     const priceFmt = (p) => country === "KR" ? won(p) : "$" + p.toFixed(2);
 
+    if (plan.action === "MOMENTUM_RIDE") {
+      return `
+        <div class="stock-plan momentum-plan">
+          ▸ <b>추세 추종 매수</b> (시장가 100%)
+          <span class="reason">사유: ${escape(plan.rationale)}</span>
+        </div>`;
+    }
     if (plan.action === "AGGRESSIVE_BUY") {
       const items = plan.target_levels.map(([price, p], i) => {
         const diff = i === 0 ? "현재가" : ((price / plan.current_price - 1) * 100).toFixed(1) + "%";
