@@ -1294,6 +1294,95 @@ class PortfolioConstructor:
             s.weight_pct = round(w * budget, 2)
         return etfs
 
+    # ── 혼합 모드 (mixed) 가중치 ──────────────────────────────
+    # risk_level별 [long_term, surge, momentum] 비중 (합 = 1.0)
+    MIXED_WEIGHTS = {
+        1: (0.80, 0.15, 0.05),
+        2: (0.65, 0.25, 0.10),
+        3: (0.50, 0.30, 0.20),
+        4: (0.35, 0.35, 0.30),
+        5: (0.20, 0.40, 0.40),
+    }
+
+    def merge_mixed(
+        self,
+        long_term_result: dict,
+        surge_result:     dict,
+        momentum_result:  dict,
+        risk_level: int,
+    ) -> dict:
+        """
+        세 모드 결과를 risk_level별 가중치로 합성.
+        같은 ticker가 여러 모드에 나오면 비중 합산.
+        cash는 가중 평균. equity_ratio도 가중 평균.
+        """
+        weights = self.MIXED_WEIGHTS.get(risk_level, (0.50, 0.30, 0.20))
+        wl, ws, wm = weights
+
+        def scale(stocks, w):
+            """모드 가중치만큼 각 종목 비중 축소"""
+            for s in stocks:
+                s.weight_pct = round(s.weight_pct * w, 2)
+            return stocks
+
+        # 각 모드의 모든 카테고리에 가중치 적용
+        long_core = scale(list(long_term_result.get("core_etfs", [])), wl)
+        long_us   = scale(list(long_term_result.get("us_stocks", [])), wl)
+        long_kr   = scale(list(long_term_result.get("kr_stocks", [])), wl)
+
+        surge_core = scale(list(surge_result.get("core_etfs", [])), ws)
+        surge_lev  = scale(list(surge_result.get("leverage_etfs", [])), ws)
+        surge_us   = scale(list(surge_result.get("us_stocks", [])), ws)
+
+        mom_us  = scale(list(momentum_result.get("us_stocks", [])), wm)
+
+        # 코어 ETF 합치기 (같은 ticker는 비중 합산)
+        core_map: dict = {}
+        for s in long_core + surge_core:
+            if s.ticker in core_map:
+                core_map[s.ticker].weight_pct = round(core_map[s.ticker].weight_pct + s.weight_pct, 2)
+                core_map[s.ticker].invest_amount = (core_map[s.ticker].invest_amount or 0) + (s.invest_amount or 0)
+            else:
+                core_map[s.ticker] = s
+
+        # 위성 (us_stocks) 합치기
+        us_map: dict = {}
+        for s in long_us + surge_us + mom_us:
+            if s.ticker in us_map:
+                us_map[s.ticker].weight_pct = round(us_map[s.ticker].weight_pct + s.weight_pct, 2)
+                us_map[s.ticker].invest_amount = (us_map[s.ticker].invest_amount or 0) + (s.invest_amount or 0)
+            else:
+                us_map[s.ticker] = s
+
+        # cash_pct, equity_ratio 가중 평균
+        cash_pct = round(
+            long_term_result["cash_pct"] * wl +
+            surge_result["cash_pct"]     * ws +
+            momentum_result["cash_pct"]  * wm, 1
+        )
+        equity_ratio = round(
+            long_term_result["equity_ratio"] * wl +
+            surge_result["equity_ratio"]     * ws +
+            momentum_result["equity_ratio"]  * wm, 3
+        )
+
+        core_list = sorted(core_map.values(), key=lambda x: -x.weight_pct)
+        us_list   = sorted(us_map.values(),   key=lambda x: -x.weight_pct)
+
+        return {
+            "equity_ratio":    equity_ratio,
+            "cash_pct":        cash_pct,
+            "core_budget":     round(sum(s.weight_pct for s in core_list), 1),
+            "leverage_budget": round(sum(s.weight_pct for s in surge_lev), 1),
+            "us_budget":       round(sum(s.weight_pct for s in us_list), 1),
+            "kr_budget":       round(sum(s.weight_pct for s in long_kr), 1),
+            "core_etfs":       core_list,
+            "leverage_etfs":   surge_lev,
+            "us_stocks":       us_list,
+            "kr_stocks":       long_kr,
+            "mixed_weights":   {"long_term": wl, "surge": ws, "momentum": wm},
+        }
+
     # ── 모멘텀 추종 모드 포트폴리오 구성 ──────────────────────
     # 단기 트레이딩이라 현금 비중 강제 ↑ (변동성 노출 제한)
     MOMENTUM_CASH_TABLE = {1: 0.50, 2: 0.40, 3: 0.30, 4: 0.22, 5: 0.15}

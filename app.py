@@ -264,6 +264,85 @@ def advise():
         # ──────────────────────────────────────────────────────
         # 전략 분기: long_term (기존) / surge (Phase B) / momentum (Phase C) / mixed (Phase D)
         # ──────────────────────────────────────────────────────
+        def _build_long_term():
+            """장기 모드 portfolio dict 구성 (mixed에서 재사용)"""
+            us_s = [s for t in advisor.cfg.us_pool if (s := advisor.screener.score(t, "US"))]
+            kr_s = [s for t in advisor.cfg.kr_pool if (s := advisor.screener.score(t, "KR"))]
+            core_s = [s for e in advisor.cfg.core_etf_pool
+                      if (s := advisor.screener.score_etf(e["ticker"], e["name"]))]
+            if not us_s and not core_s: return None, (len(advisor.cfg.us_pool), 0, len(advisor.cfg.kr_pool), 0, len(advisor.cfg.core_etf_pool), 0)
+            p = advisor.portcons.construct(us_s, kr_s, core_s, us_regime, kr_regime)
+            advisor._fill_invest_amounts(p)
+            return p, (len(advisor.cfg.us_pool), len(us_s), len(advisor.cfg.kr_pool), len(kr_s),
+                       len(advisor.cfg.core_etf_pool), len(core_s))
+
+        def _build_surge():
+            surge_s = [s for t in advisor.cfg.surge_pool if (s := advisor.screener.score_surge(t, "US"))]
+            core_s  = [s for e in advisor.cfg.surge_core_etf_pool
+                       if (s := advisor.screener.score_etf(e["ticker"], e["name"]))]
+            lev_s   = [s for e in advisor.cfg.leverage_etf_pool
+                       if (s := advisor.screener.score_etf(e["ticker"], e["name"]))]
+            if not surge_s and not core_s: return None, (len(advisor.cfg.surge_pool), 0, 0, 0,
+                                                          len(advisor.cfg.surge_core_etf_pool), 0, len(advisor.cfg.leverage_etf_pool), 0)
+            p = advisor.portcons.construct_surge(surge_s, core_s, lev_s, us_regime, risk_level)
+            advisor._fill_invest_amounts(p)
+            return p, (len(advisor.cfg.surge_pool), len(surge_s), 0, 0,
+                       len(advisor.cfg.surge_core_etf_pool), len(core_s),
+                       len(advisor.cfg.leverage_etf_pool), len(lev_s))
+
+        def _build_momentum():
+            base = list(set(advisor.cfg.us_pool + advisor.cfg.surge_pool))
+            mom_s = [s for t in base if (s := advisor.screener.score_momentum(t, "US"))]
+            qqq_meta = next((e for e in advisor.cfg.core_etf_pool if e["ticker"] == "QQQ"), None)
+            qqq_s = []
+            if qqq_meta:
+                qs = advisor.screener.score_etf("QQQ", qqq_meta["name"])
+                if qs: qqq_s = [qs]
+            if not mom_s: return None, (len(base), 0, 0, 0, 1, 0)
+            p = advisor.portcons.construct_momentum(mom_s, qqq_s, us_regime, risk_level)
+            advisor._fill_invest_amounts(p)
+            return p, (len(base), len(mom_s), 0, 0, 1, len(qqq_s))
+
+        if strategy == "mixed":
+            # ── 혼합 모드: 세 모드 각각 실행 후 가중 합성 ────
+            long_p, long_sc   = _build_long_term()
+            surge_p, surge_sc = _build_surge()
+            mom_p, mom_sc     = _build_momentum()
+
+            # 빈 결과는 빈 dict로 대체 (가중치만 적용되니 안전)
+            empty = {"equity_ratio": 0.0, "cash_pct": 0.0, "core_etfs": [],
+                     "leverage_etfs": [], "us_stocks": [], "kr_stocks": []}
+            portfolio = advisor.portcons.merge_mixed(
+                long_p or empty, surge_p or empty, mom_p or empty, risk_level
+            )
+
+            result_payload["portfolio"] = {
+                "equity_ratio":    portfolio["equity_ratio"],
+                "cash_pct":        portfolio["cash_pct"],
+                "core_budget":     portfolio["core_budget"],
+                "leverage_budget": portfolio["leverage_budget"],
+                "us_budget":       portfolio["us_budget"],
+                "kr_budget":       portfolio["kr_budget"],
+                "core_etfs":       [_serialize_stock(s) for s in portfolio["core_etfs"]],
+                "leverage_etfs":   [_serialize_stock(s) for s in portfolio["leverage_etfs"]],
+                "us_stocks":       [_serialize_stock(s) for s in portfolio["us_stocks"]],
+                "kr_stocks":       [_serialize_stock(s) for s in portfolio["kr_stocks"]],
+                "core_ratio":      advisor.cfg.core_ratio,
+                "dca_months":      advisor.cfg.dca_months,
+                "mixed_weights":   portfolio["mixed_weights"],
+                "screened": {
+                    "us_total":  (long_sc[0] if long_sc else 0) + (surge_sc[0] if surge_sc else 0),
+                    "us_passed": (long_sc[1] if long_sc else 0) + (surge_sc[1] if surge_sc else 0) + (mom_sc[1] if mom_sc else 0),
+                    "kr_total":  long_sc[2] if long_sc else 0,
+                    "kr_passed": long_sc[3] if long_sc else 0,
+                    "core_total":  (long_sc[4] if long_sc else 0) + (surge_sc[4] if surge_sc else 0),
+                    "core_passed": (long_sc[5] if long_sc else 0) + (surge_sc[5] if surge_sc else 0),
+                    "leverage_total":  surge_sc[6] if surge_sc and len(surge_sc) > 6 else 0,
+                    "leverage_passed": surge_sc[7] if surge_sc and len(surge_sc) > 7 else 0,
+                },
+            }
+            return jsonify(result_payload)
+
         if strategy == "momentum":
             # ── 모멘텀 추종 모드 (단기 트레이딩) ────────────
             # 베이스 풀: us_pool + surge_pool 합집합 (43종목)
